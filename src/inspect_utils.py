@@ -1,82 +1,54 @@
-def inspect_question(idx, x_val_df, y_true, scores, threshold):
-    """
-    idx        : index of the question in validation set
-    x_val_df   : validation DataFrame or Series containing texts
-    y_true     : binary matrix Y_val
-    scores     : val_scores (probability matrix)
-    threshold  : chosen threshold
+# if __name__ == "__main__":
+#     print("=== Basic sanity checks ===")
+#     print("Number of law documents:", len(law_documents))
+#     print("Example law doc:", law_documents[0]["law_id"], law_documents[0]["article_id"])
+#     print()
 
-    Prints debugging info for one question.
-    """
+#     # 1) Test tokenizer
+#     sample_text = "Ủy ban nhân dân cấp tỉnh cấp giấy phép phim."
+#     print("Sample text:", sample_text)
+#     print("Tokenized:", underthesea_tokenizer(sample_text))
+#     print()
 
-    print("="*80)
-    print(f"QUESTION INDEX: {idx}")
-    print("-"*80)
-    print("QUESTION TEXT:")
-    print(x_val_df.iloc[idx])
-    print()
+#     # 2) Take one training question and run BM25 retrieval
+#     example_train = train_data[0]
+#     print("Question ID:", example_train["question_id"])
+#     print("Question text:", example_train["text"])
+#     print("Gold relevant articles:", example_train["relevant_articles"])
+#     print()
 
-    # true labels
-    true_indices = np.where(y_true[idx] == 1)[0]
-    true_labels = [mlb.classes_[j] for j in true_indices]
+#     top_k = 5
+#     bm25_results = bm25_lexical_retrive(example_train["text"], top_k=top_k)
 
-    # predicted scores for all labels
-    row = scores[idx]
+#     print(f"Top {top_k} BM25 results:")
+#     for rank, cand in enumerate(bm25_results, start=1):
+#         print(f"  Rank {rank}: law={cand['law_id']} article={cand['article_id']}")
+#         print(f"    BM25 score = {cand['bm25_score']:.4f}")
+#         print("    Text snippet:", cand["text"][:120].replace("\n", " "), "...")
+#         print()
+        
+#     gold_pairs = {(ra["law_id"], ra["article_id"]) for ra in example_train["relevant_articles"]}
+#     retrieved_pairs = {(c["law_id"], c["article_id"]) for c in bm25_results}
 
-    # predicted labels above threshold
-    pred_indices = np.where(row >= threshold)[0]
-    pred_labels = [mlb.classes_[j] for j in pred_indices]
+#     overlap = gold_pairs & retrieved_pairs
+#     print("Gold pairs       :", gold_pairs)
+#     print("Retrieved pairs  :", retrieved_pairs)
+#     print("Overlap (hit)    :", overlap)
 
-    # fallback if none
-    if len(pred_indices) == 0:
-        best_idx = np.argmax(row)
-        pred_indices = [best_idx]
-        pred_labels = [mlb.classes_[best_idx]]
-        used_fallback = True
-    else:
-        used_fallback = False
+# def quick_bm25_smoke_test():
+#     assert len(law_documents) > 0, "No law documents loaded!"
+#     assert len(corpus_tokens) == len(law_documents), "Token count mismatch!"
 
-    print("TRUE LABELS:")
-    print(true_labels)
-    print()
+#     q = train_data[0]
+#     candidates = bm25_lexical_retrive(q["text"], top_k=5)
 
-    print("MODEL SCORES (top 10):")
-    top10 = np.argsort(-row)[:10]
-    for j in top10:
-        print(f"{mlb.classes_[j]:40s}  score={row[j]:.4f}")
-    print()
+#     assert len(candidates) == 5, "bm25_lexical_retrive did not return top_k results"
+#     for c in candidates:
+#         assert "doc_id" in c and "bm25_score" in c, "Missing fields in candidate"
 
-    print(f"THRESHOLD USED = {threshold}")
-    print("PREDICTED LABELS:")
-    print(pred_labels)
-    print()
+#     print("✅ quick_bm25_smoke_test passed.")
 
-    if used_fallback:
-        print("⚠️ Fallback used: model predicted nothing above threshold.")
-        print()
+# if __name__ == "__main__":
+#     quick_bm25_smoke_test()
 
-    # compute TP, FP, FN
-    true_set = set(true_indices)
-    pred_set = set(pred_indices)
 
-    tp = len(true_set & pred_set)
-    fp = len(pred_set - true_set)
-    fn = len(true_set - pred_set)
-
-    precision = tp / (tp + fp) if tp + fp > 0 else 0
-    recall    = tp / (tp + fn) if tp + fn > 0 else 0
-    beta = 2
-    beta2 = beta**2
-    if precision == 0 and recall == 0:
-        f2 = 0
-    else:
-        f2 = (1 + beta2) * precision * recall / (beta2 * precision + recall)
-
-    print("EVALUATION:")
-    print(f"TP = {tp}, FP = {fp}, FN = {fn}")
-    print(f"Precision = {precision:.4f}")
-    print(f"Recall    = {recall:.4f}")
-    print(f"F2-score  = {f2:.4f}")
-    print("="*80)
-    
-    
