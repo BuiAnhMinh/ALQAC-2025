@@ -1,11 +1,12 @@
 import json
+import os
 import numpy as np
 from tqdm import tqdm
 from underthesea import word_tokenize
 from rank_bm25 import BM25Okapi
 from transformers import AutoTokenizer, AutoModel
 from sklearn.preprocessing import MinMaxScaler
-import random
+from openai import OpenAI
 
 train_path = "data/alqac25_train.json"
 law_path = "data/alqac25_law.json"
@@ -81,4 +82,32 @@ def bm25_lexical_retrive(question_text: str, top_k: int = 50): #placeholder
             }
         )
     return results
+
+client = OpenAI(api_key = "{{SECRET_KEY}}")
+emb_model = "text-embedding-3-small"
+
+def build_article_embedding(docs, 
+                            model: str=emb_model, 
+                            batch_size: int=128,
+                            cache_path: str = "article_embedding.npy",
+                            force_recompute: bool = False):
+    if (not force_recompute) and os.path.exists(cache_path):
+        print("Loading cached article embeddings from", cache_path)
+        return np.load(cache_path)
+
+    print("Computing article embeddings with OpenAI:", model)
+    texts = [d["text"] for d in docs]
+    all_embeddings = []
+
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start : start + batch_size]
+        print(f"  Embedding batch {start}–{start+len(batch)-1} / {len(texts)}")
+        resp = client.embeddings.create(model=model, input=batch)
+        batch_embs = [np.array(item.embedding, dtype="float32") for item in resp.data]
+        all_embeddings.extend(batch_embs)
+
+    article_embeddings = np.vstack(all_embeddings)
+    np.save(cache_path, article_embeddings)
+    print("Saved article embeddings to", cache_path)
+    return article_embeddings
 
