@@ -257,6 +257,51 @@ def build_predictions_for_questions_with_embs(
     return predictions
 
 """
+return predictions in task 1 format for a list of question with scores
+"""
+def build_predictions_for_questions_with_scores(
+    questions,
+    question_embeddings: np.ndarray,
+    top_k_lexical: int = 200,
+    top_k_final: int = 5,
+    alpha: float = 0.6,
+):
+    predictions = []
+
+    for i, q in enumerate(tqdm(questions, desc="Building predictions with scores")):
+        question_text = q["text"]
+        question_id = q["question_id"]
+        q_emb = question_embeddings[i]
+
+        ranked = retrieve_and_rerank_with_qemb(
+            question_text,
+            q_emb,
+            top_k_lexical=top_k_lexical,
+            top_k_final=top_k_final,
+            alpha=alpha,
+        )
+
+        pred_articles = [
+            {
+                "law_id": r["law_id"],
+                "article_id": r["article_id"],
+                "bm25_score": r["bm25_score"],
+                "embedding_score": r["embedding_score"],
+                "combined_score": r["combined_score"],
+            }
+            for r in ranked
+        ]
+
+        predictions.append(
+            {
+                "question_id": question_id,
+                "relevant_articles": pred_articles,
+            }
+        )
+
+    return predictions
+
+"""
 gold : set of relevant article of the training data (algac25_train.json) for the question
 preds : my system predictions of said relevant articles for the question
 """
@@ -383,10 +428,26 @@ if __name__ == "__main__":
 
     print("=== Rerank macro-F2 (one config) ===")
     macro_f2_rerank(
-        top_k_lexical=200,
-        top_k_final=5,
-        alpha=0.6,
+        top_k_lexical=100,
+        top_k_final=3,
+        alpha=0.4,
         beta=2.0,
         verbose=True,
     )
-    
+
+    """
+    build predictions file with scores for training questions
+    """
+    train_predictions_with_scores = build_predictions_for_questions_with_scores(
+        train_data,
+        train_question_embeddings,
+        top_k_lexical=100,
+        top_k_final=3,
+        alpha=0.4,
+    )
+
+    out_path = "alqac25_train_predictions_with_scores.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(train_predictions_with_scores, f, ensure_ascii=False, indent=2)
+
+    print("Saved train predictions with scores to", out_path)
