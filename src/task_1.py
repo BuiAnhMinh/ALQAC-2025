@@ -7,6 +7,7 @@ from underthesea import word_tokenize
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
 from dotenv import load_dotenv
+from sklearn.linear_model import LogisticRegression
 
 load_dotenv()
 
@@ -39,11 +40,13 @@ for law in law_data:
 
 DOCID_TO_META = {d["doc_id"]: d for d in law_documents}
 
+
 def underthesea_tokenizer(text: str):
     if not isinstance(text, str):
         text = str(text)
     tokenized = word_tokenize(text, format="text")
     return tokenized.lower().split()
+
 
 corpus_tokens = [underthesea_tokenizer(doc["text"]) for doc in law_documents]
 bm25 = BM25Okapi(corpus_tokens)
@@ -72,6 +75,7 @@ def bm25_lexical_retrieve(question_text: str, top_k: int = 50):
             }
         )
     return results
+
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -114,6 +118,7 @@ def build_article_embedding(
     print("Saved article embeddings to", cache_path)
     return article_embeddings
 
+
 """
 embed the training questions and test questions
 cache to avoid API calls for the same text
@@ -147,6 +152,7 @@ def build_question_embeddings(
     print("Saved question embeddings to", cache_path)
     return question_embeddings
 
+
 article_embedding = build_article_embedding(
     law_documents,
     cache_path="article_embeddings.npy",
@@ -168,18 +174,11 @@ test_question_embeddings = build_question_embeddings(
 )
 print("Test question embeddings shape:", test_question_embeddings.shape)
 
-"""
-1. underthesea + bm25 to get top_k_lexical law documents
-2. Compute cosine similarity between question embedding with article embedding
-3. combine bm25 score with cosine similarity into one socre : 
-    combined = alpha * cos_norm + (1-alpha) * bm25_norm
-"""
-def retrieve_and_rerank_with_qemb(
+
+def compute_candidate_features(
     question_text: str,
     question_embedding: np.ndarray,
     top_k_lexical: int = 200,
-    top_k_final: int = 5,
-    alpha: float = 0.6,
 ):
     lexical_candidates = bm25_lexical_retrieve(
         question_text,
@@ -203,15 +202,42 @@ def retrieve_and_rerank_with_qemb(
     )
     cos_similarity = dot / (norms + 1e-8)
 
-    cos_min = cos_similarity.min()
-    cos_max = cos_similarity.max()
+    return lexical_candidates, bm25_norm, cos_similarity
 
-    if cos_max - cos_min > 1e-6:
-        cos_norm = (cos_similarity - cos_min) / (cos_max - cos_min)
+
+"""
+1. underthesea + bm25 to get top_k_lexical law documents
+2. Compute cosine similarity between question embedding with article embedding
+3. combine bm25 score with cosine similarity into one socre : 
+    combined = alpha * cos_norm + (1-alpha) * bm25_norm
+"""
+def retrieve_and_rerank_with_qemb(
+    question_text: str,
+    question_embedding: np.ndarray,
+    top_k_lexical: int = 200,
+    top_k_final: int = 5,
+    alpha: float = 0.6,
+    logreg_model: LogisticRegression | None = None,
+):
+    lexical_candidates, bm25_norm, cos_similarity = compute_candidate_features(
+        question_text,
+        question_embedding,
+        top_k_lexical=top_k_lexical,
+    )
+
+    if logreg_model is not None:
+        features = np.stack([bm25_norm, cos_similarity], axis=1)
+        combined_scores = logreg_model.predict_proba(features)[:, 1]
     else:
-        cos_norm = np.zeros_like(cos_similarity) + 0.5
+        cos_min = cos_similarity.min()
+        cos_max = cos_similarity.max()
 
-    combined_scores = alpha * cos_norm + (1.0 - alpha) * bm25_norm
+        if cos_max - cos_min > 1e-6:
+            cos_norm = (cos_similarity - cos_min) / (cos_max - cos_min)
+        else:
+            cos_norm = np.zeros_like(cos_similarity) + 0.5
+
+        combined_scores = alpha * cos_norm + (1.0 - alpha) * bm25_norm
 
     order = np.argsort(combined_scores)[::-1]
     top_order = order[:top_k_final]
@@ -225,6 +251,43 @@ def retrieve_and_rerank_with_qemb(
 
     return ranked_results
 
+
+def build_logreg_model(
+    top_k_lexical: int = 200,
+):
+    X_features = []
+    y_labels = []
+
+    for i, q in enumerate(tqdm(train_data, desc="Building LogReg training data")):
+        question_text = q["text"]
+        gold_articles = {
+            (ra["law_id"], ra["article_id"]) for ra in q["relevant_articles"]
+        }
+        q_emb = train_question_embeddings[i]
+
+        lexical_candidates, bm25_norm, cos_similarity = compute_candidate_features(
+            question_text,
+            q_emb,
+            top_k_lexical=top_k_lexical,
+        )
+
+        for j, cand in enumerate(lexical_candidates):
+            law_art = (cand["law_id"], cand["article_id"])
+            label = 1 if law_art in gold_articles else 0
+            X_features.append([bm25_norm[j], cos_similarity[j]])
+            y_labels.append(label)
+
+    X = np.array(X_features, dtype="float32")
+    y = np.array(y_labels, dtype="int32")
+
+    model = LogisticRegression(
+        class_weight="balanced",
+        max_iter=1000,
+    )
+    model.fit(X, y)
+    return model
+
+
 """
 return predictions in task 1 format for a list of question
 """
@@ -234,6 +297,7 @@ def build_predictions_for_questions_with_embs(
     top_k_lexical: int = 200,
     top_k_final: int = 5,
     alpha: float = 0.6,
+    logreg_model: LogisticRegression | None = None,
 ):
     predictions = []
 
@@ -248,6 +312,7 @@ def build_predictions_for_questions_with_embs(
             top_k_lexical=top_k_lexical,
             top_k_final=top_k_final,
             alpha=alpha,
+            logreg_model=logreg_model,
         )
 
         pred_articles = [
@@ -263,6 +328,7 @@ def build_predictions_for_questions_with_embs(
 
     return predictions
 
+
 """
 return predictions in task 1 format for a list of question with scores
 """
@@ -272,6 +338,7 @@ def build_predictions_for_questions_with_scores(
     top_k_lexical: int = 200,
     top_k_final: int = 5,
     alpha: float = 0.6,
+    logreg_model: LogisticRegression | None = None,
 ):
     predictions = []
 
@@ -286,6 +353,7 @@ def build_predictions_for_questions_with_scores(
             top_k_lexical=top_k_lexical,
             top_k_final=top_k_final,
             alpha=alpha,
+            logreg_model=logreg_model,
         )
 
         pred_articles = [
@@ -294,7 +362,7 @@ def build_predictions_for_questions_with_scores(
                 "article_id": r["article_id"],
                 "bm25_score": r["bm25_score"],
                 "embedding_score": r["embedding_score"],
-                "combined_score": r["combined_score"],
+                "combined_score": r["combined_score"], #this is not macro f2
             }
             for r in ranked
         ]
@@ -307,6 +375,7 @@ def build_predictions_for_questions_with_scores(
         )
 
     return predictions
+
 
 """
 gold : set of relevant article of the training data (algac25_train.json) for the question
@@ -339,6 +408,7 @@ def fbeta_for_sets(
     fbeta = (1 + beta2) * precision * recall / denom
     return fbeta
 
+
 """
 macro f2 for BM25 only, evalute the top-k choices from bm25 with the training data (algac25_train.json) :
     find fbeta between gold and predicted sets
@@ -368,6 +438,7 @@ def macro_f2_bm25_topk(
 
     return macro_fbeta
 
+
 """
 evaluate full bm25 + embedding rerank system on alqac25_train using macro fbeta
 """
@@ -377,6 +448,7 @@ def macro_f2_rerank(
     alpha: float = 0.6,
     beta: float = 2.0,
     verbose: bool = True,
+    logreg_model: LogisticRegression | None = None,
 ) -> float:
     f_scores: List[float] = []
 
@@ -395,6 +467,7 @@ def macro_f2_rerank(
             top_k_lexical=top_k_lexical,
             top_k_final=top_k_final,
             alpha=alpha,
+            logreg_model=logreg_model,
         )
         pred_articles = {(r["law_id"], r["article_id"]) for r in ranked}
 
@@ -433,51 +506,17 @@ if __name__ == "__main__":
         macro_f2_bm25_topk(k=k, beta=2.0, verbose=True)
     print()
 
-    print("=== Rerank macro-F2 (one config) ===")
+    logreg_model = build_logreg_model(top_k_lexical=200)
+
+    print("=== Rerank macro-F2 (LogReg) ===")
     macro_f2_rerank(
         top_k_lexical=200,
         top_k_final=1,
         alpha=0.4,
         beta=2.0,
         verbose=True,
+        logreg_model=logreg_model,
     )
-    
-    #Finding the best hyperparameter
-    
-    # print("\n=== Hyperparameter search for best macro-F2 ===")
-    # best_score = -1.0
-    # best_config = None
-    
-
-    # lexical_candidates = [50, 100, 150, 200]
-    # final_candidates = [1, 2, 3, 5]
-    # alpha_candidates = [0.2, 0.4, 0.6, 0.8]
-
-    # for k_lex in lexical_candidates:
-    #     for k_fin in final_candidates:
-    #         for a in alpha_candidates:
-    #             score = macro_f2_rerank(
-    #                 top_k_lexical=k_lex,
-    #                 top_k_final=k_fin,
-    #                 alpha=a,
-    #                 beta=2.0,
-    #                 verbose=False,  # keep output clean inside the search
-    #             )
-    #             print(
-    #                 f"Klex={k_lex:3d}, Kfinal={k_fin}, alpha={a:.2f} -> macro-F2={score:.4f}"
-    #             )
-
-    #             if score > best_score:
-    #                 best_score = score
-    #                 best_config = (k_lex, k_fin, a)
-
-    # print("\n=== Best config by macro-F2 on TRAIN ===")
-    # print(
-    #     f"  top_k_lexical={best_config[0]}, "
-    #     f"top_k_final={best_config[1]}, "
-    #     f"alpha={best_config[2]:.2f}"
-    # )
-    # print(f"  macro-F2={best_score:.4f}\n")
 
     """
     build predictions file with scores for training questions
@@ -488,11 +527,12 @@ if __name__ == "__main__":
         top_k_lexical=200,
         top_k_final=1,
         alpha=0.4,
+        logreg_model=logreg_model,
     )
 
     out_path = "alqac25_test_predictions.json"
-    # out_path = "alqac25_train_predictions_with_scores.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(train_predictions_with_scores, f, ensure_ascii=False, indent=2)
 
     print("Saved predictions with scores to", out_path)
+
