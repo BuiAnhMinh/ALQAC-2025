@@ -1,22 +1,18 @@
 import json
 import os
+from typing import List, Set, Tuple
 import numpy as np
 from tqdm import tqdm
 from underthesea import word_tokenize
 from rank_bm25 import BM25Okapi
-from transformers import AutoTokenizer, AutoModel
-from sklearn.preprocessing import MinMaxScaler
 from openai import OpenAI
-from config import OPENAI_API_KEY
+from dotenv import load_dotenv
+
+load_dotenv()
+
 train_path = "data/alqac25_train.json"
 law_path = "data/alqac25_law.json"
 test_path = "data/alqac25_private_test_Task_1.json"
-
-# understand how underthesea tokenize the text
-# text = "Ủy ban nhân dân cấp tỉnh cấp giấy phép phim."
-
-# tokens = word_tokenize(text.lower())
-# print(tokens)
 
 with open(law_path, "r", encoding="utf-8") as f:
     law_data = json.load(f)
@@ -26,18 +22,13 @@ with open(train_path, "r", encoding="utf-8") as f:
 
 with open(test_path, "r", encoding="utf-8") as f:
     test_data = json.load(f)
-    
-# print("Train samples:", len(train_data))
-# print("Test samples :", len(test_data))
-# print("Number of laws:", len(law_data))   
-
 
 law_documents = []
 
-for law in law_data :
+for law in law_data:
     law_id = law["id"]
-    for artc in law["articles"] :
-        law_documents.append (
+    for artc in law["articles"]:
+        law_documents.append(
             {
                 "doc_id": len(law_documents),
                 "law_id": law_id,
@@ -47,18 +38,13 @@ for law in law_data :
         )
 
 DOCID_TO_META = {d["doc_id"]: d for d in law_documents}
-        
-# print("Total law articles (documents):", len(law_documents))
 
-# Underthesea Tokenizer 
-
-def underthesea_tokenizer(text:str):
+def underthesea_tokenizer(text: str):
     if not isinstance(text, str):
         text = str(text)
     tokenized = word_tokenize(text, format="text")
     return tokenized.lower().split()
 
-    #tokinizer all articles in law 
 corpus_tokens = [underthesea_tokenizer(doc["text"]) for doc in law_documents]
 bm25 = BM25Okapi(corpus_tokens)
 
@@ -66,16 +52,16 @@ bm25 = BM25Okapi(corpus_tokens)
 bm-25 all law document
 return top_k candidate docs BM25 scores 
 """
-def bm25_lexical_retrieve(question_text: str, top_k: int = 50): #placeholder
+def bm25_lexical_retrieve(question_text: str, top_k: int = 50):
     question_tokens = underthesea_tokenizer(question_text)
     scores_list = bm25.get_scores(question_tokens)
     scores = np.array(scores_list, dtype="float32")
-    
+
     top_idx = np.argsort(scores)[::-1][:top_k]
-    
+
     results = []
-    for idx in top_idx :
-        doc = DOCID_TO_META[int(idx)]    
+    for idx in top_idx:
+        doc = DOCID_TO_META[int(idx)]
         results.append(
             {
                 "doc_id": int(idx),
@@ -88,21 +74,24 @@ def bm25_lexical_retrieve(question_text: str, top_k: int = 50): #placeholder
     return results
 
 client = OpenAI(
-    base_url = "https://openrouter.ai/api/v1",
-    api_key = os.environ["OPENROUTER_API_KEY"])
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
+)
 emb_model = "openai/text-embedding-3-small"
 
 """
 precompute embedding for all articles
 if cache exists and force_recompute = false, load cache
 if not, call OpenAI API in batches and save
-return numpy array of (num_docs, emb_dim) """
-
-def build_article_embedding(docs, 
-                            model: str=emb_model, 
-                            batch_size: int=128,
-                            cache_path: str = "article_embedding.npy",
-                            force_recompute: bool = False):
+return numpy array of (num_docs, emb_dim) 
+"""
+def build_article_embedding(
+    docs,
+    model: str = emb_model,
+    batch_size: int = 128,
+    cache_path: str = "article_embeddings.npy",
+    force_recompute: bool = False,
+):
     if (not force_recompute) and os.path.exists(cache_path):
         print("Loading cached article embeddings from", cache_path)
         return np.load(cache_path)
@@ -115,15 +104,49 @@ def build_article_embedding(docs,
         batch = texts[start : start + batch_size]
         print(f"  Embedding batch {start}-{start+len(batch)-1} / {len(texts)}")
         response = client.embeddings.create(model=model, input=batch)
-        batch_embeddings = [np.array(item.embedding, dtype="float32") for item in response.data]
+        batch_embeddings = [
+            np.array(item.embedding, dtype="float32") for item in response.data
+        ]
         all_embeddings.extend(batch_embeddings)
-        
+
     article_embeddings = np.vstack(all_embeddings)
     np.save(cache_path, article_embeddings)
     print("Saved article embeddings to", cache_path)
     return article_embeddings
 
-#sanity check
+"""
+embed the training questions and test questions
+cache to avoid API calls for the same text
+"""
+def build_question_embeddings(
+    questions,
+    model: str = emb_model,
+    batch_size: int = 64,
+    cache_path: str = "train_question_embeddings.npy",
+    force_recompute: bool = False,
+):
+    if (not force_recompute) and os.path.exists(cache_path):
+        print("Loading cached question embeddings from", cache_path)
+        return np.load(cache_path)
+
+    print("Computing question embeddings with OpenAI:", model)
+    texts = [q["text"] for q in questions]
+    all_embeddings = []
+
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start : start + batch_size]
+        print(f"  Embedding question batch {start}-{start+len(batch)-1} / {len(texts)}")
+        response = client.embeddings.create(model=model, input=batch)
+        batch_embeddings = [
+            np.array(item.embedding, dtype="float32") for item in response.data
+        ]
+        all_embeddings.extend(batch_embeddings)
+
+    question_embeddings = np.vstack(all_embeddings)
+    np.save(cache_path, question_embeddings)
+    print("Saved question embeddings to", cache_path)
+    return question_embeddings
+
 article_embedding = build_article_embedding(
     law_documents,
     cache_path="article_embeddings.npy",
@@ -131,27 +154,22 @@ article_embedding = build_article_embedding(
 )
 print("Article embeddings shape:", article_embedding.shape)
 
+train_question_embeddings = build_question_embeddings(
+    train_data,
+    cache_path="train_question_embeddings.npy",
+    force_recompute=False,
+)
+print("Train question embeddings shape:", train_question_embeddings.shape)
 
-QUESTION_EMB_CACHE = {}
-#embed the training questions and test questions
-#cache to avoid API calls for the same text
-def build_embedded_text(text: str, model: str = emb_model) -> np.ndarray:
-    if text in QUESTION_EMB_CACHE:
-        return QUESTION_EMB_CACHE[text]
-    response = client.embeddings.create(model = model, input = [text])
-    vector = np.array(response.data[0].embedding, dtype = "float32")
-    QUESTION_EMB_CACHE[text] = vector
-    return vector
-
-#retrieve and rerank
 """
 1. underthesea + bm25 to get top_k_lexical law documents
 2. Compute cosine similarity between question embedding with article embedding
 3. combine bm25 score with cosine similarity into one socre : 
     combined = alpha * cos_norm + (1-alpha) * bm25_norm
 """
-def retrieve_and_rerank(
+def retrieve_and_rerank_with_qemb(
     question_text: str,
+    question_embedding: np.ndarray,
     top_k_lexical: int = 200,
     top_k_final: int = 5,
     alpha: float = 0.6,
@@ -161,36 +179,33 @@ def retrieve_and_rerank(
         top_k=top_k_lexical,
     )
     cand_doc_ids = [c["doc_id"] for c in lexical_candidates]
-    bm25_scores = np.array([c["bm25_score"] for c in lexical_candidates], dtype="float32")
+    bm25_scores = np.array(
+        [c["bm25_score"] for c in lexical_candidates], dtype="float32"
+    )
 
-    # Normalize BM25 scores to [0, 1] e.g. 0, 0.2, 0.5, ... , 1
     if bm25_scores.max() > 0:
         bm25_norm = bm25_scores / bm25_scores.max()
     else:
         bm25_norm = bm25_scores
 
-    # embedding similarity
-    question_embedding = build_embedded_text(question_text)               # shape (d,)
-    candidate_embedding = article_embedding[cand_doc_ids]    # shape (n_cand, d)
+    candidate_embedding = article_embedding[cand_doc_ids]
 
-    # cosine similarity
     dot = candidate_embedding @ question_embedding
-    norms = np.linalg.norm(candidate_embedding, axis=1) * np.linalg.norm(question_embedding)
-    cos_similarity = dot / (norms + 1e-8)  # avoid divide by zero
+    norms = np.linalg.norm(candidate_embedding, axis=1) * np.linalg.norm(
+        question_embedding
+    )
+    cos_similarity = dot / (norms + 1e-8)
 
-    # Normalize cosine similarity to [0, 1]
     cos_min = cos_similarity.min()
-    cos_max =  cos_similarity.max()
-    
+    cos_max = cos_similarity.max()
+
     if cos_max - cos_min > 1e-6:
         cos_norm = (cos_similarity - cos_min) / (cos_max - cos_min)
     else:
         cos_norm = np.zeros_like(cos_similarity) + 0.5
 
-    # combine scores
     combined_scores = alpha * cos_norm + (1.0 - alpha) * bm25_norm
 
-    # Sort by combined score
     order = np.argsort(combined_scores)[::-1]
     top_order = order[:top_k_final]
 
@@ -206,29 +221,30 @@ def retrieve_and_rerank(
 """
 return predictions in task 1 format for a list of question
 """
-
-def build_predictions_for_questions(
+def build_predictions_for_questions_with_embs(
     questions,
+    question_embeddings: np.ndarray,
     top_k_lexical: int = 200,
     top_k_final: int = 5,
     alpha: float = 0.6,
 ):
     predictions = []
 
-    for q in tqdm(questions, desc="Building predictions"):
+    for i, q in enumerate(tqdm(questions, desc="Building predictions")):
         question_text = q["text"]
         question_id = q["question_id"]
+        q_emb = question_embeddings[i]
 
-        ranked = retrieve_and_rerank(
+        ranked = retrieve_and_rerank_with_qemb(
             question_text,
+            q_emb,
             top_k_lexical=top_k_lexical,
             top_k_final=top_k_final,
             alpha=alpha,
         )
 
         pred_articles = [
-            {"law_id": r["law_id"], "article_id": r["article_id"]}
-            for r in ranked
+            {"law_id": r["law_id"], "article_id": r["article_id"]} for r in ranked
         ]
 
         predictions.append(
@@ -240,42 +256,137 @@ def build_predictions_for_questions(
 
     return predictions
 
+"""
+gold : set of relevant article of the training data (algac25_train.json) for the question
+preds : my system predictions of said relevant articles for the question
+"""
+def fbeta_for_sets(
+    gold: Set[Tuple[str, str]],
+    preds: Set[Tuple[str, str]],
+    beta: float = 2.0,
+) -> float:
+    true_positive = len(gold & preds)
+    false_positive = len(preds - gold)
+    false_negative = len(gold - preds)
 
-#sanity check
-if __name__ == "__main__":
-    print("\n=== Sanity check on first train question ===")
-    example_train = train_data[0]
-    print("Question ID:", example_train["question_id"])
-    print("Text      :", example_train["text"])
-    print("Gold      :", example_train["relevant_articles"])
-    print()
+    if true_positive == 0 and false_negative == 0 and false_positive == 0:
+        return 0.0
 
-    bm25_only = bm25_lexical_retrieve(example_train["text"], top_k=5)
-    print("Top-5 BM25 only:")
-    for i, c in enumerate(bm25_only, start=1):
-        print(f"  [{i}] law={c['law_id']} article={c['article_id']} BM25={c['bm25_score']:.2f}")
-    print()
+    if true_positive == 0:
+        return 0.0
 
-    ranked = retrieve_and_rerank(example_train["text"], top_k_lexical=200, top_k_final=5, alpha=0.6)
-    print("Top-5 BM25 + Embedding:")
-    for i, c in enumerate(ranked, start=1):
+    precision = true_positive / (true_positive + false_positive)
+    recall = true_positive / (true_positive + false_negative)
+
+    beta2 = beta ** 2
+    denom = beta2 * precision + recall
+
+    if denom == 0:
+        return 0.0
+
+    fbeta = (1 + beta2) * precision * recall / denom
+    return fbeta
+
+"""
+macro f2 for BM25 only, evalute the top-k choices from bm25 with the training data (algac25_train.json) :
+    find fbeta between gold and predicted sets
+    the macro fbeta (the average of all questions)
+"""
+def macro_f2_bm25_topk(
+    k: int = 3,
+    beta: float = 2.0,
+    verbose: bool = True,
+) -> float:
+    f_scores: List[float] = []
+    for q in tqdm(train_data, desc=f"[Macro] BM25 F{beta} @ top-{k}"):
+        question_text = q["text"]
+        gold_articles = {
+            (ra["law_id"], ra["article_id"]) for ra in q["relevant_articles"]
+        }
+
+        bm25_results = bm25_lexical_retrieve(question_text, top_k=k)
+        pred_articles = {(c["law_id"], c["article_id"]) for c in bm25_results}
+
+        f_question = fbeta_for_sets(gold_articles, pred_articles, beta=beta)
+        f_scores.append(f_question)
+
+    macro_fbeta = float(np.mean(f_scores))
+    if verbose:
+        print(f"BM25 macro-F{beta:.1f} @ top-{k}: {macro_fbeta:.4f}")
+
+    return macro_fbeta
+
+"""
+evaluate full bm25 + embedding rerank system on alqac25_train using macro fbeta
+"""
+def macro_f2_rerank(
+    top_k_lexical: int = 200,
+    top_k_final: int = 5,
+    alpha: float = 0.6,
+    beta: float = 2.0,
+    verbose: bool = True,
+) -> float:
+    f_scores: List[float] = []
+
+    desc = f"[Macro] Rerank F{beta} (Klex={top_k_lexical}, Kfinal={top_k_final}, alpha={alpha})"
+    for i, q in enumerate(tqdm(train_data, desc=desc)):
+        question_text = q["text"]
+        gold_articles = {
+            (ra["law_id"], ra["article_id"]) for ra in q["relevant_articles"]
+        }
+
+        q_emb = train_question_embeddings[i]
+
+        ranked = retrieve_and_rerank_with_qemb(
+            question_text,
+            q_emb,
+            top_k_lexical=top_k_lexical,
+            top_k_final=top_k_final,
+            alpha=alpha,
+        )
+        pred_articles = {(r["law_id"], r["article_id"]) for r in ranked}
+
+        f_q = fbeta_for_sets(gold_articles, pred_articles, beta=beta)
+        f_scores.append(f_q)
+
+    macro_fbeta = float(np.mean(f_scores))
+    if verbose:
         print(
-            f"  [{i}] law={c['law_id']} article={c['article_id']} "
-            f"BM25={c['bm25_score']:.2f} Cos={c['embedding_score']:.3f} Comb={c['combined_score']:.3f}"
+            f"Rerank macro-F{beta:.1f} "
+            f"(Klex={top_k_lexical}, Kfinal={top_k_final}, alpha={alpha}): "
+            f"{macro_fbeta:.4f}"
+        )
+
+    return macro_fbeta
+
+
+if __name__ == "__main__":
+    print("=== Sanity check on first train question ===")
+    ex = train_data[0]
+    print("Question ID:", ex["question_id"])
+    print("Text      :", ex["text"])
+    print("Gold      :", ex["relevant_articles"])
+    print()
+
+    bm25_res = bm25_lexical_retrieve(ex["text"], top_k=5)
+    print("Top-5 BM25 only:")
+    for i, c in enumerate(bm25_res, start=1):
+        print(
+            f"  [{i}] law={c['law_id']} article={c['article_id']} BM25={c['bm25_score']:.2f}"
         )
     print()
 
-    # Build predictions for private test and save
-    print("=== Building predictions for private test Task 1 ===")
-    test_predictions = build_predictions_for_questions(
-        test_data,
+    print("=== BM25-only macro-F2 for different top-k ===")
+    for k in range(1, 6):
+        macro_f2_bm25_topk(k=k, beta=2.0, verbose=True)
+    print()
+
+    print("=== Rerank macro-F2 (one config) ===")
+    macro_f2_rerank(
         top_k_lexical=200,
         top_k_final=5,
         alpha=0.6,
+        beta=2.0,
+        verbose=True,
     )
-
-    out_path = "alqac25_task1_predictions_openai.json"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(test_predictions, f, ensure_ascii=False, indent=2)
-
-    print("Saved test predictions to", out_path)
+    
