@@ -7,6 +7,7 @@ from rank_bm25 import BM25Okapi
 from transformers import AutoTokenizer, AutoModel
 from sklearn.preprocessing import MinMaxScaler
 from openai import OpenAI
+from config import OPENAI_API_KEY
 
 train_path = "data/alqac25_train.json"
 law_path = "data/alqac25_law.json"
@@ -83,7 +84,7 @@ def bm25_lexical_retrive(question_text: str, top_k: int = 50): #placeholder
         )
     return results
 
-client = OpenAI(api_key = "{{SECRET_KEY}}")
+client = OpenAI(api_key = OPENAI_API_KEY)
 emb_model = "text-embedding-3-small"
 
 def build_article_embedding(docs, 
@@ -101,7 +102,7 @@ def build_article_embedding(docs,
 
     for start in range(0, len(texts), batch_size):
         batch = texts[start : start + batch_size]
-        print(f"  Embedding batch {start}–{start+len(batch)-1} / {len(texts)}")
+        print(f"  Embedding batch {start}-{start+len(batch)-1} / {len(texts)}")
         resp = client.embeddings.create(model=model, input=batch)
         batch_embs = [np.array(item.embedding, dtype="float32") for item in resp.data]
         all_embeddings.extend(batch_embs)
@@ -110,4 +111,6 @@ def build_article_embedding(docs,
     np.save(cache_path, article_embeddings)
     print("Saved article embeddings to", cache_path)
     return article_embeddings
+
+
 
