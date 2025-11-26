@@ -161,6 +161,13 @@ train_question_embeddings = build_question_embeddings(
 )
 print("Train question embeddings shape:", train_question_embeddings.shape)
 
+test_question_embeddings = build_question_embeddings(
+    test_data,
+    cache_path="test_question_embeddings.npy",
+    force_recompute=False,
+)
+print("Test question embeddings shape:", test_question_embeddings.shape)
+
 """
 1. underthesea + bm25 to get top_k_lexical law documents
 2. Compute cosine similarity between question embedding with article embedding
@@ -434,20 +441,58 @@ if __name__ == "__main__":
         beta=2.0,
         verbose=True,
     )
+    
+    #Finding the best hyperparameter
+    
+    # print("\n=== Hyperparameter search for best macro-F2 ===")
+    # best_score = -1.0
+    # best_config = None
+    
+
+    # lexical_candidates = [50, 100, 150, 200]
+    # final_candidates = [1, 2, 3, 5]
+    # alpha_candidates = [0.2, 0.4, 0.6, 0.8]
+
+    # for k_lex in lexical_candidates:
+    #     for k_fin in final_candidates:
+    #         for a in alpha_candidates:
+    #             score = macro_f2_rerank(
+    #                 top_k_lexical=k_lex,
+    #                 top_k_final=k_fin,
+    #                 alpha=a,
+    #                 beta=2.0,
+    #                 verbose=False,  # keep output clean inside the search
+    #             )
+    #             print(
+    #                 f"Klex={k_lex:3d}, Kfinal={k_fin}, alpha={a:.2f} -> macro-F2={score:.4f}"
+    #             )
+
+    #             if score > best_score:
+    #                 best_score = score
+    #                 best_config = (k_lex, k_fin, a)
+
+    # print("\n=== Best config by macro-F2 on TRAIN ===")
+    # print(
+    #     f"  top_k_lexical={best_config[0]}, "
+    #     f"top_k_final={best_config[1]}, "
+    #     f"alpha={best_config[2]:.2f}"
+    # )
+    # print(f"  macro-F2={best_score:.4f}\n")
 
     """
     build predictions file with scores for training questions
     """
     train_predictions_with_scores = build_predictions_for_questions_with_scores(
-        train_data,
-        train_question_embeddings,
-        top_k_lexical=100,
-        top_k_final=3,
+        test_data,
+        test_question_embeddings,
+        top_k_lexical=200,
+        top_k_final=1,
         alpha=0.4,
     )
 
-    out_path = "alqac25_train_predictions_with_scores.json"
+    out_path = "alqac25_test_predictions.json"
+    # out_path = "alqac25_train_predictions_with_scores.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(train_predictions_with_scores, f, ensure_ascii=False, indent=2)
 
-    print("Saved train predictions with scores to", out_path)
+    print("Saved predictions with scores to", out_path)
