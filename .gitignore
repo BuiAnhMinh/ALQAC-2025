@@ -1,2 +1,5 @@
 .env
+__pycache__
+article_embeddings.npy
+alqac25_task1_predictions_openai.json
 
