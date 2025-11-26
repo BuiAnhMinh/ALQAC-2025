@@ -435,8 +435,8 @@ if __name__ == "__main__":
 
     print("=== Rerank macro-F2 (one config) ===")
     macro_f2_rerank(
-        top_k_lexical=100,
-        top_k_final=3,
+        top_k_lexical=200,
+        top_k_final=1,
         alpha=0.4,
         beta=2.0,
         verbose=True,
@@ -486,7 +486,7 @@ if __name__ == "__main__":
         test_data,
         test_question_embeddings,
         top_k_lexical=200,
-        top_k_final=3,
+        top_k_final=1,
         alpha=0.4,
     )
 
