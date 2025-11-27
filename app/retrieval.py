@@ -30,31 +30,78 @@ with open(zalo_law_path, "r", encoding="utf-8") as f:
     
 law_documents = []
 
+skipped_empty_alqac = 0
+skipped_empty_zalo = 0
+
 for law in law_data:
     law_id = law["id"]
     for artc in law["articles"]:
+        raw_text = artc.get("text", "")
+        if raw_text is None:
+            raw_text = ""
+        text = str(raw_text).strip()
+
+        # skip completely empty articles
+        if len(text) == 0:
+            skipped_empty_alqac += 1
+            continue
+
         law_documents.append(
             {
-                "doc_id": len(law_documents),
                 "law_id": law_id,
                 "article_id": artc["id"],
-                "text": artc["text"],
+                "text": text,
             }
         )
+        
+num_alqac_docs = len(law_documents)
         
 for law in zalo_law_data:
     law_id = law["id"]
     for artc in law["articles"]:
+        raw_text = artc.get("text", "")
+        if raw_text is None:
+            raw_text = ""
+        text = str(raw_text).strip()
+
+        # skip completely empty articles
+        if len(text) == 0:
+            skipped_empty_zalo += 1
+            continue
+
         law_documents.append(
             {
                 "doc_id": len(law_documents),
                 "law_id": law_id,
                 "article_id": artc["id"],
-                "text": artc["text"],
+                "text": text,
             }
-        )   
+        )
+        
+num_total_docs = len(law_documents)
+num_zalo_docs = num_total_docs - num_alqac_docs
+
+print(f"ALQAC articles: {num_alqac_docs} (skipped empty: {skipped_empty_alqac})")
+print(f"Zalo  articles: {num_zalo_docs} (skipped empty: {skipped_empty_zalo})")
+print(f"Total articles: {num_total_docs}")
 
 DOCID_TO_META = {d["doc_id"]: d for d in law_documents}
+
+# debug flattened_law_articles
+
+# for d in law_documents:
+#     t = d["text"]
+#     if not isinstance(t, str):
+#         t = str(t)
+#     d["text_len"] = len(t)
+
+# debug_path = "data/all_laws_flattened_debug.json"
+# with open(debug_path, "w", encoding="utf-8") as f:
+#     json.dump(law_documents, f, ensure_ascii=False, indent=2)
+
+# print("Flattened law corpus saved to", debug_path)
+# print(f"ALQAC docs are doc_id 0 .. {num_alqac_docs-1}")
+# print(f"Zalo  docs are doc_id {num_alqac_docs} .. {num_total_docs-1}")
 
 #loading stopwords
 def load_stopwords(path: str) -> set[str]:
@@ -121,36 +168,82 @@ if cache exists and force_recompute = false, load cache
 if not, call OpenAI API in batches and save
 return numpy array of (num_docs, emb_dim) 
 """
+
+MAX_CHARS = 4000      # truncate super-long texts
+BATCH_SIZE = 64       # you already use 64, good
+SAVE_EVERY = 50       # save to disk after every 50 batches (tweak as you like)
+
 def build_article_embedding(
     docs,
     model: str = emb_model,
-    batch_size: int = 128,
-    cache_path: str = "article_embeddings.npy",
+    cache_path: str = "article_embeddings_all.npy",
     force_recompute: bool = False,
 ):
-    if (not force_recompute) and os.path.exists(cache_path):
-        print("Loading cached article embeddings from", cache_path)
-        return np.load(cache_path)
+    # 1. Load existing cache if any
+    if os.path.exists(cache_path) and not force_recompute:
+        existing = np.load(cache_path)
+        done = existing.shape[0]
+        print(f"Loading cached embeddings from {cache_path}, already have {done}/{len(docs)} docs")
+        # store as list of arrays so we can append easily
+        all_embeddings = [emb for emb in existing]
+    else:
+        print(f"No existing cache, starting embeddings from scratch for {len(docs)} docs")
+        done = 0
+        all_embeddings = []
 
-    print("Computing article embeddings with OpenAI:", model)
-    texts = [d["text"] for d in docs]
-    all_embeddings = []
+    # 2. Preprocess texts
+    texts = []
+    for d in docs:
+        t = d["text"]
+        if not isinstance(t, str):
+            t = str(t)
+        t = t.replace("\n", " ")
+        if len(t) > MAX_CHARS:
+            t = t[:MAX_CHARS]
+        texts.append(t)
 
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start : start + batch_size]
-        print(f"  Embedding batch {start}-{start+len(batch)-1} / {len(texts)}")
-        response = client.embeddings.create(model=model, input=batch)
+    total = len(texts)
+    batch_count_since_save = 0
+
+    # 3. Embed from `done` onwards
+    for start in range(done, total, BATCH_SIZE):
+        batch = texts[start : start + BATCH_SIZE]
+        print(f"  Embedding batch {start}-{start+len(batch)-1} / {total}")
+
+        try:
+            response = client.embeddings.create(model=model, input=batch)
+        except Exception as e:
+            print(f"!! Error calling embeddings API on batch {start}-{start+len(batch)-1}: {e}")
+            print("   Batch lengths:", [len(x) for x in batch])
+            break  # stop here so we still save what we already have
+
+        if not hasattr(response, "data") or len(response.data) == 0:
+            print(f"!! No data returned for batch {start}-{start+len(batch)-1}")
+            print("   Batch lengths:", [len(x) for x in batch])
+            break  # also stop, but keep progress
+
         batch_embeddings = [
             np.array(item.embedding, dtype="float32") for item in response.data
         ]
         all_embeddings.extend(batch_embeddings)
+        batch_count_since_save += 1
 
-    article_embeddings = np.vstack(all_embeddings)
-    np.save(cache_path, article_embeddings)
-    print("Saved article embeddings to", cache_path)
-    return article_embeddings
+        # 4. Periodically save progress
+        if batch_count_since_save >= SAVE_EVERY:
+            arr = np.vstack(all_embeddings)
+            np.save(cache_path, arr)
+            print(f"  [checkpoint] Saved {arr.shape[0]} embeddings to {cache_path}")
+            batch_count_since_save = 0
 
-
+    # 5. Final save at the end (or at last checkpoint point)
+    if all_embeddings:
+        arr = np.vstack(all_embeddings)
+        np.save(cache_path, arr)
+        print(f"Saved {arr.shape[0]} embeddings to {cache_path}")
+        return arr
+    else:
+        raise RuntimeError("No embeddings computed at all")
+    
 """
 embed the training questions and test questions
 cache to avoid API calls for the same text
@@ -240,9 +333,68 @@ def compute_candidate_features(
 """
 1. underthesea + bm25 to get top_k_lexical law documents
 2. Compute cosine similarity between question embedding with article embedding
+"""
+
+
+article_embedding = build_article_embedding(
+    law_documents,
+    cache_path="article_embeddings.npy",
+    force_recompute=False,
+)
+print("Article embeddings shape:", article_embedding.shape)
+
+train_question_embeddings = build_question_embeddings(
+    train_data,
+    cache_path="train_question_embeddings.npy",
+    force_recompute=False,
+)
+print("Train question embeddings shape:", train_question_embeddings.shape)
+
+test_question_embeddings = build_question_embeddings(
+    test_data,
+    cache_path="test_question_embeddings.npy",
+    force_recompute=False,
+)
+print("Test question embeddings shape:", test_question_embeddings.shape)
+
+
+def compute_candidate_features(
+    question_text: str,
+    question_embedding: np.ndarray,
+    top_k_lexical: int = 200,
+):
+    lexical_candidates = bm25_lexical_retrieve(
+        question_text,
+        top_k=top_k_lexical,
+    )
+    cand_doc_ids = [c["doc_id"] for c in lexical_candidates]
+    bm25_scores = np.array(
+        [c["bm25_score"] for c in lexical_candidates], dtype="float32"
+    )
+
+    if bm25_scores.max() > 0:
+        bm25_norm = bm25_scores / bm25_scores.max()
+    else:
+        bm25_norm = bm25_scores
+
+    candidate_embedding = article_embedding[cand_doc_ids]
+
+    dot = candidate_embedding @ question_embedding
+    norms = np.linalg.norm(candidate_embedding, axis=1) * np.linalg.norm(
+        question_embedding
+    )
+    cos_similarity = dot / (norms + 1e-8)
+
+    return lexical_candidates, bm25_norm, cos_similarity
+
+
+"""
+1. underthesea + bm25 to get top_k_lexical law documents
+2. Compute cosine similarity between question embedding with article embedding
 3. combine bm25 score with cosine similarity into one socre : 
     combined = alpha * cos_norm + (1-alpha) * bm25_norm
 """
+
 def retrieve_and_rerank_with_qemb(
     question_text: str,
     question_embedding: np.ndarray,
@@ -515,53 +667,3 @@ def macro_f2_rerank(
         )
 
     return macro_fbeta
-
-
-if __name__ == "__main__":
-    # Optional: still keep a tiny sanity check if you like
-    # ex = train_data[0]
-    # print("=== Sanity check on first train question ===")
-    # print("Question ID:", ex["question_id"])
-    # print("Text      :", ex["text"])
-    # print("Gold      :", ex["relevant_articles"])
-    # print()
-
-    # 1) BM25 baselines (no per-k spam, just a few configs you care about)
-    bm25_f2_top1 = macro_f2_bm25_topk(k=1, beta=2.0, verbose=False)
-    bm25_f2_top3 = macro_f2_bm25_topk(k=3, beta=2.0, verbose=False)
-
-    # 2) Train LogReg reranker
-    logreg_model = build_logreg_model(top_k_lexical=200)
-
-    # 3) Rerank macro-F2 (LogReg)
-    rerank_f2_top1 = macro_f2_rerank(
-        top_k_lexical=200,
-        top_k_final=1,
-        alpha=0.4,
-        beta=2.0,
-        verbose=False,
-        logreg_model=logreg_model,
-    )
-
-    # 4) Print a SMALL summary table
-    print("\n=== Macro-F2 summary (all questions) ===")
-    print(f"BM25-only @ top-1        : {bm25_f2_top1:.4f}")
-    print(f"BM25-only @ top-3        : {bm25_f2_top3:.4f}")
-    print(f"BM25+Embeddings (LogReg) : {rerank_f2_top1:.4f}")
-    print()
-
-    # 5) Build predictions file for the test questions
-    train_predictions_with_scores = build_predictions_for_questions_with_scores(
-        test_data,
-        test_question_embeddings,
-        top_k_lexical=200,
-        top_k_final=1,
-        alpha=0.4,
-        logreg_model=logreg_model,
-    )
-
-    out_path = "alqac25_test_predictions.json"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(train_predictions_with_scores, f, ensure_ascii=False, indent=2)
-
-    print("Saved predictions with scores to", out_path)
