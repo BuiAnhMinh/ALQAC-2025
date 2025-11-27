@@ -14,6 +14,7 @@ load_dotenv()
 train_path = "data/alqac25_train.json"
 law_path = "data/alqac25_law.json"
 test_path = "data/alqac25_private_test_Task_1.json"
+zalo_law_path = "data/zalo_corpus.json"
 
 with open(law_path, "r", encoding="utf-8") as f:
     law_data = json.load(f)
@@ -24,6 +25,9 @@ with open(train_path, "r", encoding="utf-8") as f:
 with open(test_path, "r", encoding="utf-8") as f:
     test_data = json.load(f)
 
+with open(zalo_law_path, "r", encoding="utf-8") as f:
+    zalo_law_data = json.load(f)
+    
 law_documents = []
 
 for law in law_data:
@@ -37,6 +41,18 @@ for law in law_data:
                 "text": artc["text"],
             }
         )
+        
+for law in zalo_law_data:
+    law_id = law["id"]
+    for artc in law["articles"]:
+        law_documents.append(
+            {
+                "doc_id": len(law_documents),
+                "law_id": law_id,
+                "article_id": artc["id"],
+                "text": artc["text"],
+            }
+        )   
 
 DOCID_TO_META = {d["doc_id"]: d for d in law_documents}
 
@@ -433,7 +449,7 @@ macro f2 for BM25 only, evalute the top-k choices from bm25 with the training da
 def macro_f2_bm25_topk(
     k: int = 3,
     beta: float = 2.0,
-    verbose: bool = True,
+    verbose: bool = False,
 ) -> float:
     f_scores: List[float] = []
     for q in tqdm(train_data, desc=f"[Macro] BM25 F{beta} @ top-{k}"):
@@ -463,7 +479,7 @@ def macro_f2_rerank(
     top_k_final: int = 5,
     alpha: float = 0.6,
     beta: float = 2.0,
-    verbose: bool = True,
+    verbose: bool = False,
     logreg_model: LogisticRegression | None = None,
 ) -> float:
     f_scores: List[float] = []
@@ -502,41 +518,39 @@ def macro_f2_rerank(
 
 
 if __name__ == "__main__":
-    print("=== Sanity check on first train question ===")
-    ex = train_data[0]
-    print("Question ID:", ex["question_id"])
-    print("Text      :", ex["text"])
-    print("Gold      :", ex["relevant_articles"])
-    print()
+    # Optional: still keep a tiny sanity check if you like
+    # ex = train_data[0]
+    # print("=== Sanity check on first train question ===")
+    # print("Question ID:", ex["question_id"])
+    # print("Text      :", ex["text"])
+    # print("Gold      :", ex["relevant_articles"])
+    # print()
 
-    bm25_res = bm25_lexical_retrieve(ex["text"], top_k=5)
-    print("Top-5 BM25 only:")
-    for i, c in enumerate(bm25_res, start=1):
-        print(
-            f"  [{i}] law={c['law_id']} article={c['article_id']} BM25={c['bm25_score']:.2f}"
-        )
-    print()
+    # 1) BM25 baselines (no per-k spam, just a few configs you care about)
+    bm25_f2_top1 = macro_f2_bm25_topk(k=1, beta=2.0, verbose=False)
+    bm25_f2_top3 = macro_f2_bm25_topk(k=3, beta=2.0, verbose=False)
 
-    print("=== BM25-only macro-F2 for different top-k ===")
-    for k in range(1, 6):
-        macro_f2_bm25_topk(k=k, beta=2.0, verbose=True)
-    print()
-
+    # 2) Train LogReg reranker
     logreg_model = build_logreg_model(top_k_lexical=200)
 
-    print("=== Rerank macro-F2 (LogReg) ===")
-    macro_f2_rerank(
+    # 3) Rerank macro-F2 (LogReg)
+    rerank_f2_top1 = macro_f2_rerank(
         top_k_lexical=200,
         top_k_final=1,
         alpha=0.4,
         beta=2.0,
-        verbose=True,
+        verbose=False,
         logreg_model=logreg_model,
     )
 
-    """
-    build predictions file with scores for training questions
-    """
+    # 4) Print a SMALL summary table
+    print("\n=== Macro-F2 summary (all questions) ===")
+    print(f"BM25-only @ top-1        : {bm25_f2_top1:.4f}")
+    print(f"BM25-only @ top-3        : {bm25_f2_top3:.4f}")
+    print(f"BM25+Embeddings (LogReg) : {rerank_f2_top1:.4f}")
+    print()
+
+    # 5) Build predictions file for the test questions
     train_predictions_with_scores = build_predictions_for_questions_with_scores(
         test_data,
         test_question_embeddings,
@@ -551,4 +565,3 @@ if __name__ == "__main__":
         json.dump(train_predictions_with_scores, f, ensure_ascii=False, indent=2)
 
     print("Saved predictions with scores to", out_path)
-
