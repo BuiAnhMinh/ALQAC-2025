@@ -40,12 +40,28 @@ for law in law_data:
 
 DOCID_TO_META = {d["doc_id"]: d for d in law_documents}
 
+#loading stopwords
+def load_stopwords(path: str) -> set[str]:
+    stopwords = set()
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            w = line.strip()
+            if w:
+                stopwords.add(w)
+    return stopwords
+
+STOPWORDS = load_stopwords("data/vietnamese-stopwords.txt")
+LEGAL_WHITELIST = {"phải", "không", "được", "cấm", "trừ", "khi", "nếu", "vì"}
+STOPWORDS = STOPWORDS - LEGAL_WHITELIST
 
 def underthesea_tokenizer(text: str):
     if not isinstance(text, str):
         text = str(text)
     tokenized = word_tokenize(text, format="text")
-    return tokenized.lower().split()
+    tokens = tokenized.lower().split()
+    
+    tokens = [t for t in tokens if t not in STOPWORDS]
+    return tokens
 
 
 corpus_tokens = [underthesea_tokenizer(doc["text"]) for doc in law_documents]
