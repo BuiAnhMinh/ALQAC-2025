@@ -11,7 +11,7 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
 EMB_MODEL = os.getenv("EMB_MODEL", "openai/text-embedding-3-small")
-
+LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-4.1-mini")
 # Paths
 DATA_DIR = Path("data")
 TRAIN_PATH = DATA_DIR / "alqac25_train.json"
@@ -23,6 +23,7 @@ STOPWORDS_PATH = DATA_DIR / "vietnamese-stopwords.txt"
 ARTICLE_EMB_PATH = DATA_DIR / "article_embeddings.npy"
 TRAIN_Q_EMB_PATH = DATA_DIR / "train_question_embeddings.npy"
 TEST_Q_EMB_PATH = DATA_DIR / "test_question_embeddings.npy"
+ARTICLE_TOKENS_PATH = DATA_DIR / "article_tokens.json"
 
 # Embedding params
 MAX_CHARS = 4000

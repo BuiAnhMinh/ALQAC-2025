@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 import numpy as np
 from tqdm import tqdm
 
-from config import (
+from app.config import (
     EMB_MODEL,
     MAX_CHARS,
     BATCH_SIZE,
@@ -14,9 +14,9 @@ from config import (
     ARTICLE_EMB_PATH,
     TRAIN_Q_EMB_PATH,
     TEST_Q_EMB_PATH,
+    get_client
 )
-from config import get_client
-from data_loader import load_law_documents, load_train_data, load_test_data
+from app.data_loader import load_law_documents, load_train_data, load_test_data
 
 
 def preprocess_texts(docs: List[Dict[str, Any]]) -> List[str]:

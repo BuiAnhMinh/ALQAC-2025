@@ -1,5 +1,6 @@
 # retrieval.py
 import json
+from pathlib import Path
 from typing import List, Set, Tuple, Dict, Any
 
 import numpy as np
@@ -8,14 +9,15 @@ from underthesea import word_tokenize
 from rank_bm25 import BM25Okapi
 from sklearn.linear_model import LogisticRegression
 
-from config import (
+from app.config import (
     STOPWORDS_PATH,
     ARTICLE_EMB_PATH,
     TRAIN_Q_EMB_PATH,
     TEST_Q_EMB_PATH,
+    ARTICLE_TOKENS_PATH,
 )
-from data_loader import load_law_documents, load_train_data, load_test_data
-from embeddings import embed_text
+from app.data_loader import load_law_documents, load_train_data, load_test_data
+from app.embedding import embed_text
 
 # ---------- Load data ----------
 law_documents = load_law_documents()
@@ -50,7 +52,31 @@ def underthesea_tokenizer(text: str):
     return tokens
 
 
-corpus_tokens = [underthesea_tokenizer(doc["text"]) for doc in law_documents]
+def load_or_build_article_tokens(
+    docs: List[Dict[str, Any]],
+    cache_path: Path = ARTICLE_TOKENS_PATH,
+) -> List[List[str]]:
+    cache_path = Path(cache_path)
+    if cache_path.exists():
+        with cache_path.open("r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if isinstance(cached, list) and len(cached) == len(docs):
+            print(f"Loaded cached tokens from {cache_path}")
+            return cached
+        print(
+            f"Cached tokens at {cache_path} do not match corpus ("
+            f"{len(cached)} vs {len(docs)}), rebuilding..."
+        )
+
+    tokens = [underthesea_tokenizer(doc["text"]) for doc in docs]
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("w", encoding="utf-8") as f:
+        json.dump(tokens, f, ensure_ascii=False)
+    print(f"Saved tokenized articles to {cache_path}")
+    return tokens
+
+
+corpus_tokens = load_or_build_article_tokens(law_documents)
 bm25 = BM25Okapi(corpus_tokens)
 
 # ---------- Load embeddings ----------

@@ -3,7 +3,7 @@ import json
 from typing import List, Dict, Any
 from pathlib import Path
 
-from config import LAW_PATH, ZALO_LAW_PATH, TRAIN_PATH, TEST_PATH
+from app.config import LAW_PATH, ZALO_LAW_PATH, TRAIN_PATH, TEST_PATH
 
 
 def load_json(path: Path):

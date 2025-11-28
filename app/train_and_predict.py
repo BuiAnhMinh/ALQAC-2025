@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from retrieval import (
+from app.retrieval import (
     train_data,
     test_data,
     train_question_embeddings,
@@ -56,3 +56,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

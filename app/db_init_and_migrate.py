@@ -1,7 +1,7 @@
 # db_init_and_migrate.py
 from typing import Dict
-from config import get_connection
-from data_loader import load_law_documents
+from app.config import get_connection
+from app.data_loader import load_law_documents
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS laws (
