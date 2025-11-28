@@ -1,14 +1,3 @@
-<<<<<<< HEAD
-from dotenv import load_dotenv
-import os
-import psycopg2
-
-load_dotenv()  # loads variables from .env into environment
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-DB_HOST = os.getenv("DB_HOST", "db")               # service name in docker-compose
-=======
 # config.py
 from dotenv import load_dotenv
 import os
@@ -42,28 +31,19 @@ SAVE_EVERY = 50
 
 # DB config (for laws/articles migration)
 DB_HOST = os.getenv("DB_HOST", "db")
->>>>>>> 53babd6 (hello)
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_USER = os.getenv("DB_USER", "legal_ai")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "secret")
 DB_NAME = os.getenv("DB_NAME", "legal_ai")
-<<<<<<< HEAD
-def get_connection():
-    
-=======
 
 
 def get_connection():
->>>>>>> 53babd6 (hello)
     return psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
         user=DB_USER,
         password=DB_PASSWORD,
         dbname=DB_NAME,
-<<<<<<< HEAD
-    )
-=======
     )
 
 
@@ -72,4 +52,3 @@ def get_client() -> OpenAI:
         base_url=OPENAI_BASE_URL,
         api_key=OPENAI_API_KEY,
     )
->>>>>>> 53babd6 (hello)
