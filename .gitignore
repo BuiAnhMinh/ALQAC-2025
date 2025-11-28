@@ -5,4 +5,5 @@ alqac25_test_predictions.json
 train_question_embeddings.npy
 alqac25_train_predictions_with_scores.json
 test_question_embeddings.npyd
-data
+data 
+output

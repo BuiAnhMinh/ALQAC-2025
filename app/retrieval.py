@@ -1,24 +1,31 @@
+# retrieval.py
 import json
-import os
-from typing import List, Set, Tuple
+from typing import List, Set, Tuple, Dict, Any
+
 import numpy as np
 from tqdm import tqdm
 from underthesea import word_tokenize
 from rank_bm25 import BM25Okapi
-from openai import OpenAI
-from dotenv import load_dotenv
 from sklearn.linear_model import LogisticRegression
 
-load_dotenv()
+from config import (
+    STOPWORDS_PATH,
+    ARTICLE_EMB_PATH,
+    TRAIN_Q_EMB_PATH,
+    TEST_Q_EMB_PATH,
+)
+from data_loader import load_law_documents, load_train_data, load_test_data
+from embedding import embed_text
 
-train_path = "data/alqac25_train.json"
-law_path = "data/alqac25_law.json"
-test_path = "data/alqac25_private_test_Task_1.json"
-zalo_law_path = "data/zalo_corpus.json"
+# ---------- Load data ----------
+law_documents = load_law_documents()
+train_data = load_train_data()
+test_data = load_test_data()
 
-with open(law_path, "r", encoding="utf-8") as f:
-    law_data = json.load(f)
+# Build mapping doc_id -> metadata
+DOCID_TO_META: Dict[int, Dict[str, Any]] = {d["doc_id"]: d for d in law_documents}
 
+<<<<<<< HEAD
 with open(train_path, "r", encoding="utf-8") as f:
     train_data = json.load(f)
 
@@ -104,6 +111,9 @@ DOCID_TO_META = {d["doc_id"]: d for d in law_documents}
 # print(f"Zalo  docs are doc_id {num_alqac_docs} .. {num_total_docs-1}")
 
 #loading stopwords
+=======
+# ---------- Stopwords & tokenizer ----------
+>>>>>>> 53babd6 (hello)
 def load_stopwords(path: str) -> set[str]:
     stopwords = set()
     with open(path, "r", encoding="utf-8") as f:
@@ -113,16 +123,17 @@ def load_stopwords(path: str) -> set[str]:
                 stopwords.add(w)
     return stopwords
 
-STOPWORDS = load_stopwords("data/vietnamese-stopwords.txt")
+
+STOPWORDS = load_stopwords(str(STOPWORDS_PATH))
 LEGAL_WHITELIST = {"phải", "không", "được", "cấm", "trừ", "khi", "nếu", "vì"}
 STOPWORDS = STOPWORDS - LEGAL_WHITELIST
+
 
 def underthesea_tokenizer(text: str):
     if not isinstance(text, str):
         text = str(text)
     tokenized = word_tokenize(text, format="text")
     tokens = tokenized.lower().split()
-    
     tokens = [t for t in tokens if t not in STOPWORDS]
     return tokens
 
@@ -130,10 +141,18 @@ def underthesea_tokenizer(text: str):
 corpus_tokens = [underthesea_tokenizer(doc["text"]) for doc in law_documents]
 bm25 = BM25Okapi(corpus_tokens)
 
-"""
-bm-25 all law document
-return top_k candidate docs BM25 scores 
-"""
+# ---------- Load embeddings ----------
+article_embedding = np.load(ARTICLE_EMB_PATH)
+print("Article embeddings shape:", article_embedding.shape)
+
+train_question_embeddings = np.load(TRAIN_Q_EMB_PATH)
+print("Train question embeddings shape:", train_question_embeddings.shape)
+
+test_question_embeddings = np.load(TEST_Q_EMB_PATH)
+print("Test question embeddings shape:", test_question_embeddings.shape)
+
+
+# ---------- BM25 retrieval ----------
 def bm25_lexical_retrieve(question_text: str, top_k: int = 50):
     question_tokens = underthesea_tokenizer(question_text)
     scores_list = bm25.get_scores(question_tokens)
@@ -156,6 +175,7 @@ def bm25_lexical_retrieve(question_text: str, top_k: int = 50):
     return results
 
 
+<<<<<<< HEAD
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.environ["OPENROUTER_API_KEY"],
@@ -300,6 +320,9 @@ test_question_embeddings = build_question_embeddings(
 print("Test question embeddings shape:", test_question_embeddings.shape)
 
 
+=======
+# ---------- Feature computation ----------
+>>>>>>> 53babd6 (hello)
 def compute_candidate_features(
     question_text: str,
     question_embedding: np.ndarray,
@@ -330,6 +353,7 @@ def compute_candidate_features(
     return lexical_candidates, bm25_norm, cos_similarity
 
 
+<<<<<<< HEAD
 """
 1. underthesea + bm25 to get top_k_lexical law documents
 2. Compute cosine similarity between question embedding with article embedding
@@ -395,6 +419,9 @@ def compute_candidate_features(
     combined = alpha * cos_norm + (1-alpha) * bm25_norm
 """
 
+=======
+# ---------- Retrieval + rerank ----------
+>>>>>>> 53babd6 (hello)
 def retrieve_and_rerank_with_qemb(
     question_text: str,
     question_embedding: np.ndarray,
@@ -472,9 +499,6 @@ def build_logreg_model(
     return model
 
 
-"""
-return predictions in task 1 format for a list of question
-"""
 def build_predictions_for_questions_with_embs(
     questions,
     question_embeddings: np.ndarray,
@@ -513,9 +537,6 @@ def build_predictions_for_questions_with_embs(
     return predictions
 
 
-"""
-return predictions in task 1 format for a list of question with scores
-"""
 def build_predictions_for_questions_with_scores(
     questions,
     question_embeddings: np.ndarray,
@@ -544,9 +565,6 @@ def build_predictions_for_questions_with_scores(
             {
                 "law_id": r["law_id"],
                 "article_id": r["article_id"],
-                "bm25_score": r["bm25_score"],
-                "embedding_score": r["embedding_score"],
-                "combined_score": r["combined_score"], #this is not macro f2
             }
             for r in ranked
         ]
@@ -561,10 +579,7 @@ def build_predictions_for_questions_with_scores(
     return predictions
 
 
-"""
-gold : set of relevant article of the training data (algac25_train.json) for the question
-preds : my system predictions of said relevant articles for the question
-"""
+# ---------- Metrics ----------
 def fbeta_for_sets(
     gold: Set[Tuple[str, str]],
     preds: Set[Tuple[str, str]],
@@ -593,11 +608,6 @@ def fbeta_for_sets(
     return fbeta
 
 
-"""
-macro f2 for BM25 only, evalute the top-k choices from bm25 with the training data (algac25_train.json) :
-    find fbeta between gold and predicted sets
-    the macro fbeta (the average of all questions)
-"""
 def macro_f2_bm25_topk(
     k: int = 3,
     beta: float = 2.0,
@@ -623,9 +633,6 @@ def macro_f2_bm25_topk(
     return macro_fbeta
 
 
-"""
-evaluate full bm25 + embedding rerank system on alqac25_train using macro fbeta
-"""
 def macro_f2_rerank(
     top_k_lexical: int = 200,
     top_k_final: int = 5,
@@ -666,4 +673,8 @@ def macro_f2_rerank(
             f"{macro_fbeta:.4f}"
         )
 
+<<<<<<< HEAD
     return macro_fbeta
+=======
+    return macro_fbeta
+>>>>>>> 53babd6 (hello)
