@@ -127,7 +127,7 @@ def build_question_embeddings(
 
 
 def embed_text(text: str) -> np.ndarray:
-    from config import MAX_CHARS
+    from app.config import MAX_CHARS
     client = get_client()
 
     if not isinstance(text, str):

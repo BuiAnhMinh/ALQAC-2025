@@ -18,7 +18,7 @@ services:
       - legal_net
 
   db:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     container_name: legal_ai_db
     restart: unless-stopped
     environment:

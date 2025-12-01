@@ -4,6 +4,8 @@ from app.config import get_connection
 from app.data_loader import load_law_documents
 
 SCHEMA_SQL = """
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS laws (
     id          SERIAL PRIMARY KEY,
     law_id      TEXT NOT NULL UNIQUE,
@@ -20,6 +22,9 @@ CREATE TABLE IF NOT EXISTS articles (
     created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_law_article UNIQUE (law_id, article_id)
 );
+    
+ALTER TABLE articles
+ADD COLUMN IF NOT EXISTS embedding vector(1536);
 
 CREATE INDEX IF NOT EXISTS idx_articles_law_fk ON articles(law_fk);
 CREATE INDEX IF NOT EXISTS idx_articles_law_id_article_id
@@ -37,7 +42,7 @@ def main():
     try:
         cur.execute(SCHEMA_SQL)
         conn.commit()
-        print("Schema ensured (laws, articles).")
+        print("Schema ensured (laws, articles, embedding).")
 
         # Insert distinct laws
         seen = set()
