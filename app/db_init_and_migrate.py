@@ -2,6 +2,7 @@
 from typing import Dict
 from app.config import get_connection
 from app.data_loader import load_law_documents
+from underthesea import word_tokenize
 
 SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -25,6 +26,9 @@ CREATE TABLE IF NOT EXISTS articles (
     
 ALTER TABLE articles
 ADD COLUMN IF NOT EXISTS embedding vector(1536);
+
+ALTER TABLE articles
+    ADD COLUMN IF NOT EXISTS tokens TEXT[];
 
 CREATE INDEX IF NOT EXISTS idx_articles_law_fk ON articles(law_fk);
 CREATE INDEX IF NOT EXISTS idx_articles_law_id_article_id
