@@ -1,8 +1,9 @@
-# db_init_and_migrate.py
-from typing import Dict
-from app.config import get_connection
-from app.data_loader import load_law_documents
+from typing import Dict, List, Set
+
 from underthesea import word_tokenize
+from pathlib import Path
+from app.config import get_connection, STOPWORDS_PATH
+from app.data_loader import load_law_documents
 
 SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -20,25 +21,47 @@ CREATE TABLE IF NOT EXISTS articles (
     law_id      TEXT NOT NULL,
     article_id  TEXT NOT NULL,
     text        TEXT NOT NULL,
+    embedding   vector(1536),
+    tokens      TEXT[],
     created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_law_article UNIQUE (law_id, article_id)
 );
-    
-ALTER TABLE articles
-ADD COLUMN IF NOT EXISTS embedding vector(1536);
 
-ALTER TABLE articles
-    ADD COLUMN IF NOT EXISTS tokens TEXT[];
+CREATE INDEX IF NOT EXISTS idx_articles_law_fk
+    ON articles(law_fk);
 
-CREATE INDEX IF NOT EXISTS idx_articles_law_fk ON articles(law_fk);
 CREATE INDEX IF NOT EXISTS idx_articles_law_id_article_id
     ON articles(law_id, article_id);
 """
+LEGAL_WHITELIST = {"phải", "không", "được", "cấm", "trừ", "khi", "nếu", "vì"}
+
+
+def _load_stopwords(path: Path) -> Set[str]:
+    stopwords: Set[str] = set()
+    if not path.exists():
+        return stopwords
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            w = line.strip()
+            if w:
+                stopwords.add(w)
+    return stopwords
+
+STOPWORDS = _load_stopwords(Path(STOPWORDS_PATH)) - LEGAL_WHITELIST
+
+
+def _tokenize_text(text: str) -> List[str]:
+    if not isinstance(text, str):
+        text = str(text)
+    tok_str = word_tokenize(text, format="text")
+    tokens = tok_str.split()
+    return [t for t in tokens if t not in STOPWORDS]
 
 
 def main():
     docs = load_law_documents()
     total_docs = len(docs)
+    print(f"Loaded {total_docs} docs from loader.")
 
     conn = get_connection()
     cur = conn.cursor()
@@ -46,7 +69,7 @@ def main():
     try:
         cur.execute(SCHEMA_SQL)
         conn.commit()
-        print("Schema ensured (laws, articles, embedding).")
+        print("Schema ensured (laws, articles).")
 
         # Insert distinct laws
         seen = set()
@@ -76,7 +99,7 @@ def main():
         if missing_laws:
             print("WARNING: some law_id not in laws table, examples:", list(missing_laws)[:5])
 
-        # Insert articles
+        # Insert articles with tokens
         inserted_articles = 0
         print(f"Start inserting {total_docs} articles...")
         for d in docs:
@@ -86,13 +109,18 @@ def main():
                 continue
 
             law_pk = law_id_to_pk[law_id]
+            text = d["text"] or ""
+            tokens = _tokenize_text(text)
+
             cur.execute(
                 """
-                INSERT INTO articles (law_fk, law_id, article_id, text)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (law_id, article_id) DO NOTHING;
+                INSERT INTO articles (law_fk, law_id, article_id, text, tokens)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (law_id, article_id) DO UPDATE
+                SET text = EXCLUDED.text,
+                    tokens = EXCLUDED.tokens;
                 """,
-                (law_pk, law_id, d["article_id"], d["text"]),
+                (law_pk, law_id, d["article_id"], text, tokens),
             )
             inserted_articles += 1
 

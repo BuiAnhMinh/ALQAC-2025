@@ -1,36 +1,42 @@
-# config.py
 from dotenv import load_dotenv
 import os
-import psycopg2
 from pathlib import Path
+
+import psycopg2
 from openai import OpenAI
 
 load_dotenv()
 
-# OpenAI / OpenRouter
+# ========== OpenAI / OpenRouter ==========
 OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+
 EMB_MODEL = os.getenv("EMB_MODEL", "openai/text-embedding-3-small")
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-4.1-mini")
-# Paths
-DATA_DIR = Path("data")
-TRAIN_PATH = DATA_DIR / "alqac25_train.json"
-LAW_PATH = DATA_DIR / "alqac25_law.json"
-TEST_PATH = DATA_DIR / "alqac25_private_test_Task_1.json"
-ZALO_LAW_PATH = DATA_DIR / "zalo_corpus.json"
-STOPWORDS_PATH = DATA_DIR / "vietnamese-stopwords.txt"
 
-ARTICLE_EMB_PATH = DATA_DIR / "article_embeddings.npy"
-TRAIN_Q_EMB_PATH = DATA_DIR / "train_question_embeddings.npy"
-TEST_Q_EMB_PATH = DATA_DIR / "test_question_embeddings.npy"
-ARTICLE_TOKENS_PATH = DATA_DIR / "article_tokens.json"
+# ========== Paths ==========
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 
-# Embedding params
-MAX_CHARS = 4000
-BATCH_SIZE = 64
-SAVE_EVERY = 50
+# Law corpora (adjust these in .env to match your real files)
+LAW_PATH = Path(os.getenv("LAW_PATH", DATA_DIR / "alqac25_law.json"))
+ZALO_LAW_PATH = Path(os.getenv("ZALO_LAW_PATH", DATA_DIR / "zalo_corpus.json"))
 
-# DB config (for laws/articles migration)
+TRAIN_PATH = Path(os.getenv("TRAIN_PATH", DATA_DIR / "alqac25_train.json"))
+TEST_PATH = Path(os.getenv("TEST_PATH", DATA_DIR / "alqac25_private_test_Task_1.json"))
+
+ARTICLE_EMB_PATH = Path(os.getenv("ARTICLE_EMB_PATH", DATA_DIR / "article_embeddings.npy"))
+TRAIN_Q_EMB_PATH = Path(os.getenv("TRAIN_Q_EMB_PATH", DATA_DIR / "train_question_embeddings.npy"))
+TEST_Q_EMB_PATH = Path(os.getenv("TEST_Q_EMB_PATH", DATA_DIR / "test_question_embeddings.npy"))
+
+ARTICLE_TOKENS_PATH = Path(os.getenv("ARTICLE_TOKENS_PATH", DATA_DIR / "article_tokens.json"))
+STOPWORDS_PATH = Path(os.getenv("STOPWORDS_PATH", DATA_DIR / "vietnamese-stopwords.txt"))
+
+# ========== Embedding settings ==========
+MAX_CHARS = int(os.getenv("MAX_CHARS", "4000"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "64"))
+SAVE_EVERY = int(os.getenv("SAVE_EVERY", "50"))
+
+# ========== DB config (Postgres / pgvector) ==========
 DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_USER = os.getenv("DB_USER", "legal_ai")
@@ -39,6 +45,7 @@ DB_NAME = os.getenv("DB_NAME", "legal_ai")
 
 
 def get_connection():
+    """Return a psycopg2 connection to the Postgres DB."""
     return psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -49,6 +56,7 @@ def get_connection():
 
 
 def get_client() -> OpenAI:
+    """Return an OpenAI client (used for embeddings + QA)."""
     return OpenAI(
         base_url=OPENAI_BASE_URL,
         api_key=OPENAI_API_KEY,

@@ -11,10 +11,8 @@ from app.config import (
     get_connection,
 )
 
-# for openai calling then fill the embedding into database (postgres/pgvector docker database)
 
 def preprocess_batch(texts: List[str]) -> List[str]:
-    """Match your existing preprocessing (truncate, remove newlines)."""
     cleaned = []
     for t in texts:
         if not isinstance(t, str):
@@ -44,60 +42,48 @@ def fetch_articles_without_embedding(cur, limit: int) -> List[Tuple[int, str]]:
     return cur.fetchall()
 
 
-def embed_batch(texts: List[str]) -> np.ndarray:
-    """
-    Call OpenAI embeddings API in batch using your config.
-    Returns np.ndarray of shape (len(texts), dim).
-    """
-    client = get_client()
-    resp = client.embeddings.create(
-        model=EMB_MODEL,
-        input=texts,
-    )
-    embs = [np.array(item.embedding, dtype="float32") for item in resp.data]
-    return np.vstack(embs)
-
-
 def main():
+    client = get_client()
     conn = get_connection()
     conn.autocommit = False
     cur = conn.cursor()
 
     try:
-        total_done = 0
+        total_updated = 0
 
         while True:
             rows = fetch_articles_without_embedding(cur, BATCH_SIZE)
             if not rows:
-                print("No more articles without embedding. Done.")
+                print("No more articles without embeddings. Done.")
                 break
 
-            ids = [r[0] for r in rows]
-            raw_texts = [r[1] for r in rows]
-            texts = preprocess_batch(raw_texts)
+            ids = [row[0] for row in rows]
+            texts = [row[1] for row in rows]
+            texts = preprocess_batch(texts)
 
-            print(f"Embedding batch of {len(ids)} articles...")
-            embs = embed_batch(texts)  # shape: (batch_size, dim)
+            print(f"Embedding {len(texts)} articles starting from id {ids[0]}...")
+            resp = client.embeddings.create(model=EMB_MODEL, input=texts)
+            embs = [np.array(item.embedding, dtype="float32").tolist() for item in resp.data]
 
-            # Update each article with its embedding
-            for art_id, emb in zip(ids, embs):
-                cur.execute(
-                    """
-                    UPDATE articles
-                    SET embedding = %s
-                    WHERE id = %s;
-                    """,
-                    (emb.tolist(), art_id),
-                )
+            batch_values = list(zip(embs, ids))
 
+            cur.executemany(
+                """
+                UPDATE articles
+                SET embedding = %s
+                WHERE id = %s;
+                """,
+                batch_values,
+            )
             conn.commit()
-            total_done += len(ids)
-            print(f"Embedded and updated {total_done} articles so far...")
+
+            total_updated += len(ids)
+            print(f"Updated embeddings for {total_updated} articles so far...")
 
         print("All embeddings generated and stored in DB.")
     except Exception as e:
         conn.rollback()
-        print("ERROR during embedding generation:", repr(e))
+        print("ERROR during embedding fill:", repr(e))
         raise
     finally:
         cur.close()

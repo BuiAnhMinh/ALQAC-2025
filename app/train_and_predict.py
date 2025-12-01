@@ -1,4 +1,3 @@
-# train_and_predict.py
 import json
 from pathlib import Path
 
@@ -13,37 +12,39 @@ from app.retrieval import (
     build_predictions_for_questions_with_scores,
 )
 
+
 def main():
     # 1) BM25 baselines
-    bm25_f2_top1 = macro_f2_bm25_topk(k=1, beta=2.0, verbose=False)
-    bm25_f2_top3 = macro_f2_bm25_topk(k=3, beta=2.0, verbose=False)
+    bm25_f2_top1 = macro_f2_bm25_topk(k=1, beta=2.0, verbose=True)
+    bm25_f2_top3 = macro_f2_bm25_topk(k=3, beta=2.0, verbose=True)
+    bm25_f2_top5 = macro_f2_bm25_topk(k=5, beta=2.0, verbose=True)
 
-    # 2) Train LogReg reranker
+    print("BM25 Macro-F2:")
+    print("  top-1:", bm25_f2_top1)
+    print("  top-3:", bm25_f2_top3)
+    print("  top-5:", bm25_f2_top5)
+
+    # 2) Train logistic regression reranker
     logreg_model = build_logreg_model(top_k_lexical=200)
 
-    # 3) Rerank macro-F2 (LogReg)
-    rerank_f2_top1 = macro_f2_rerank(
-        top_k_lexical=200,
-        top_k_final=1,
-        alpha=0.4,
+    # 3) Evaluate reranker
+    rerank_f2 = macro_f2_rerank(
         beta=2.0,
-        verbose=False,
-        logreg_model=logreg_model,
-    )
-
-    print("\n=== Macro-F2 summary (all questions) ===")
-    print(f"BM25-only @ top-1        : {bm25_f2_top1:.4f}")
-    print(f"BM25-only @ top-3        : {bm25_f2_top3:.4f}")
-    print(f"BM25+Embeddings (LogReg) : {rerank_f2_top1:.4f}")
-    print()
-
-    # 4) Build predictions file for the test questions
-    test_predictions_with_scores = build_predictions_for_questions_with_scores(
-        test_data,
-        test_question_embeddings,
         top_k_lexical=200,
-        top_k_final=1,
-        alpha=0.4,
+        top_k_final=3,
+        alpha=0.6,
+        logreg_model=logreg_model,
+        verbose=True,
+    )
+    print("Rerank Macro-F2:", rerank_f2)
+
+    # 4) Build predictions for private test set
+    test_predictions_with_scores = build_predictions_for_questions_with_scores(
+        questions=test_data,
+        question_embeddings=test_question_embeddings,
+        top_k_lexical=200,
+        top_k_final=3,
+        alpha=0.6,
         logreg_model=logreg_model,
     )
 
@@ -56,4 +57,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
