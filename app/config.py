@@ -8,7 +8,7 @@ from openai import OpenAI
 load_dotenv()
 
 # ========== OpenAI / OpenRouter ==========
-OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
 
 EMB_MODEL = os.getenv("EMB_MODEL", "openai/text-embedding-3-small")

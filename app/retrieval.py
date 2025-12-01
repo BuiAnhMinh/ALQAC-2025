@@ -10,114 +10,180 @@ from sklearn.linear_model import LogisticRegression
 
 from app.config import (
     STOPWORDS_PATH,
-    ARTICLE_EMB_PATH,
     TRAIN_Q_EMB_PATH,
     TEST_Q_EMB_PATH,
-    ARTICLE_TOKENS_PATH,
 )
-from app.data_loader import load_law_documents, load_train_data, load_test_data
+from app.config import get_connection
+from app.data_loader import load_train_data, load_test_data
 
 
-# ---------- Load data ----------
-law_documents: List[Dict[str, Any]] = load_law_documents()
-train_data: List[Dict[str, Any]] = load_train_data()
-test_data: List[Dict[str, Any]] = load_test_data()
+# ============================================================
+# 0. Tokenizer + stopwords
+# ============================================================
 
-# Build mapping doc_id -> metadata
-DOCID_TO_META: Dict[int, Dict[str, Any]] = {d["doc_id"]: d for d in law_documents}
-DOC_KEY_TO_ID: Dict[Tuple[str, str], int] = {
-    (d["law_id"], d["article_id"]): d["doc_id"] for d in law_documents
-}
-
-# ---------- Stopwords & tokenizer ----------
-def load_stopwords(path: Path) -> Set[str]:
-    stopwords: Set[str] = set()
-    if not path.exists():
-        return stopwords
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            w = line.strip()
-            if w:
-                stopwords.add(w)
-    return stopwords
+def load_stopwords() -> Set[str]:
+    """
+    Load Vietnamese stopwords from STOPWORDS_PATH (one token per line).
+    If the file is missing, returns an empty set.
+    """
+    if STOPWORDS_PATH and Path(STOPWORDS_PATH).exists():
+        with open(STOPWORDS_PATH, "r", encoding="utf-8") as f:
+            return {w.strip() for w in f if w.strip()}
+    return set()
 
 
-STOPWORDS = load_stopwords(STOPWORDS_PATH)
-LEGAL_WHITELIST = {"phải", "không", "được", "cấm", "trừ", "khi", "nếu", "vì"}
-STOPWORDS = STOPWORDS - LEGAL_WHITELIST
+STOPWORDS: Set[str] = load_stopwords()
 
 
 def underthesea_tokenizer(text: str) -> List[str]:
-    if not isinstance(text, str):
-        text = str(text)
-    # underthesea returns a string like "Luật_này quy_định"
-    tok_str = word_tokenize(text, format="text")
-    tokens = tok_str.split()
-    # simple stopword filter
+    """
+    Tokenize text using underthesea and remove stopwords.
+    """
+    tokens = word_tokenize(text, format="text").split()
     return [t for t in tokens if t not in STOPWORDS]
 
 
-# ---------- Article tokenization cache ----------
-def load_or_build_article_tokens(
-    docs: List[Dict[str, Any]],
-    cache_path: Path = ARTICLE_TOKENS_PATH,
-) -> List[List[str]]:
-    cache_path = Path(cache_path)
-    if cache_path.exists():
-        with cache_path.open("r", encoding="utf-8") as f:
-            cached = json.load(f)
-        if isinstance(cached, list) and len(cached) == len(docs):
-            print(f"Loaded cached tokens from {cache_path}")
-            return cached
-        print(
-            f"Cached tokens at {cache_path} do not match corpus "
-            f"({len(cached)} vs {len(docs)}), rebuilding..."
+# ============================================================
+# 1. Load articles from DB (single source of truth)
+# ============================================================
+
+def load_articles_from_db() -> List[Dict[str, Any]]:
+    """
+    Load ALL articles from the database.
+
+    We rely ONLY on the `articles` table now:
+        id, law_fk, law_id, article_id, text, embedding, tokens, created_at
+
+    We do NOT use law_documents.json anymore.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, law_id, article_id, text, tokens, embedding
+            FROM articles
+            ORDER BY id;
+            """
         )
+        rows = cur.fetchall()
 
-    tokens = [underthesea_tokenizer(doc["text"]) for doc in docs]
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with cache_path.open("w", encoding="utf-8") as f:
-        json.dump(tokens, f, ensure_ascii=False)
-    print(f"Saved tokenized articles to {cache_path}")
-    return tokens
+        articles: List[Dict[str, Any]] = []
+
+        for db_id, law_id, article_id, text, tokens, embedding in rows:
+            # ---- tokens ----
+            if isinstance(tokens, list):
+                token_list = tokens
+            else:
+                # stored as JSON / text
+                token_list = json.loads(tokens)
+
+            # ---- embedding ----
+            # If using pgvector, psycopg2 usually returns a Python list already.
+            if isinstance(embedding, list) or isinstance(embedding, tuple):
+                emb_vec = np.array(embedding, dtype="float32")
+            else:
+                # if stored as JSON string
+                emb_vec = np.array(json.loads(embedding), dtype="float32")
+
+            articles.append(
+                {
+                    "db_id": db_id,
+                    "law_id": law_id,
+                    "article_id": article_id,
+                    "text": text,
+                    "tokens": token_list,
+                    "embedding": emb_vec,
+                }
+            )
+
+        # assign internal doc_id = index position
+        for idx, art in enumerate(articles):
+            art["doc_id"] = idx
+
+        print(f"Loaded {len(articles)} articles from DB.")
+        return articles
+
+    finally:
+        cur.close()
+        conn.close()
 
 
-corpus_tokens: List[List[str]] = load_or_build_article_tokens(law_documents)
+ARTICLES: List[Dict[str, Any]] = load_articles_from_db()
+
+# Mapping internal doc_id -> metadata
+DOCID_TO_META: Dict[int, Dict[str, Any]] = {
+    a["doc_id"]: a for a in ARTICLES
+}
+
+# Mapping (law_id, article_id) -> internal doc_id
+DOC_KEY_TO_ID: Dict[Tuple[str, str], int] = {
+    (a["law_id"], a["article_id"]): a["doc_id"] for a in ARTICLES
+}
+
+
+# ============================================================
+# 2. Build BM25 corpus and article embeddings from DB data
+# ============================================================
+
+# BM25 corpus = tokens column
+corpus_tokens: List[List[str]] = [a["tokens"] for a in ARTICLES]
 bm25 = BM25Okapi(corpus_tokens)
 
-# ---------- Load embeddings ----------
-article_embedding: np.ndarray = np.load(ARTICLE_EMB_PATH)
+# article_embedding array = stack of embedding column
+article_embedding: np.ndarray = np.stack(
+    [a["embedding"] for a in ARTICLES],
+    axis=0,
+).astype("float32")
+
+print("Article embeddings shape:", article_embedding.shape)
+
+
+# ============================================================
+# 3. Load question embeddings (still from .npy)
+# ============================================================
+
 train_question_embeddings: np.ndarray = np.load(TRAIN_Q_EMB_PATH)
 test_question_embeddings: np.ndarray = np.load(TEST_Q_EMB_PATH)
 
-print("Article embeddings shape:", article_embedding.shape)
 print("Train question embeddings shape:", train_question_embeddings.shape)
 print("Test question embeddings shape:", test_question_embeddings.shape)
 
-if article_embedding.shape[0] != len(law_documents):
-    raise ValueError(
-        f"Mismatch: {article_embedding.shape[0]} embeddings vs "
-        f"{len(law_documents)} docs. Regenerate embeddings for the full corpus."
-    )
+
+# ============================================================
+# 4. Load ALQAC train/test question JSON (NOT law docs!)
+# ============================================================
+
+train_data: List[Dict[str, Any]] = load_train_data()
+test_data: List[Dict[str, Any]] = load_test_data()
 
 
-# ---------- BM25 retrieval ----------
-def bm25_lexical_retrieve(question_text: str, top_k: int = 50) -> List[Dict[str, Any]]:
+# ============================================================
+# 5. BM25 lexical retrieval
+# ============================================================
+
+def bm25_lexical_retrieve(
+    question_text: str,
+    top_k: int = 50,
+) -> List[Dict[str, Any]]:
     """
     Pure lexical retrieval from BM25 over tokenized corpus.
     Returns a list of:
       {
-        "doc_id": int,
+        "doc_id": int,          # internal index into article_embedding / DOCID_TO_META
         "bm25_score": float,
         "law_id": str,
         "article_id": str,
         "text": str,
       }
+
+    You can set top_k=200 (or any number) to get more candidates.
     """
     question_tokens = underthesea_tokenizer(question_text)
     scores_list = bm25.get_scores(question_tokens)
     scores = np.array(scores_list, dtype="float32")
 
+    # indices of docs sorted by BM25 score (desc)
     top_idx = np.argsort(scores)[::-1][:top_k]
 
     results: List[Dict[str, Any]] = []
@@ -135,7 +201,10 @@ def bm25_lexical_retrieve(question_text: str, top_k: int = 50) -> List[Dict[str,
     return results
 
 
-# ---------- Feature computation ----------
+# ============================================================
+# 6. Feature computation (BM25 + embedding cosine)
+# ============================================================
+
 def compute_candidate_features(
     question_text: str,
     question_embedding: np.ndarray,
@@ -143,6 +212,11 @@ def compute_candidate_features(
 ) -> Tuple[List[Dict[str, Any]], np.ndarray, np.ndarray]:
     """
     Get BM25 candidates + normalized BM25 scores + cosine similarities.
+
+    Returns:
+      lexical_candidates: list of candidate doc info dicts
+      bm25_norm:          normalized BM25 scores in [0, 1]
+      cos_similarity:     cosine similarity between question and doc embeddings
     """
     lexical_candidates = bm25_lexical_retrieve(
         question_text,
@@ -153,13 +227,16 @@ def compute_candidate_features(
         [c["bm25_score"] for c in lexical_candidates], dtype="float32"
     )
 
+    # Normalize BM25 to [0, 1]
     if bm25_scores.max() > 0:
         bm25_norm = bm25_scores / bm25_scores.max()
     else:
         bm25_norm = bm25_scores
 
+    # Take embeddings of candidate docs
     candidate_embedding = article_embedding[cand_doc_ids]
 
+    # Cosine similarity
     dot = candidate_embedding @ question_embedding
     norms = np.linalg.norm(candidate_embedding, axis=1) * np.linalg.norm(
         question_embedding
@@ -169,10 +246,13 @@ def compute_candidate_features(
     return lexical_candidates, bm25_norm, cos_similarity
 
 
-# ---------- Ground truth utilities ----------
+# ============================================================
+# 7. Ground truth utilities (for Task 1 training/eval)
+# ============================================================
+
 def _build_gold_docid_sets() -> Dict[str, Set[int]]:
     """
-    Map question_id -> set of true doc_ids using (law_id, article_id).
+    Map question_id -> set of true internal doc_ids using (law_id, article_id).
     """
     gold: Dict[str, Set[int]] = {}
     for q in train_data:
@@ -190,6 +270,9 @@ QUESTION_GOLD_DOCIDS: Dict[str, Set[int]] = _build_gold_docid_sets()
 
 
 def f_beta_for_sets(y_true: Set[int], y_pred: Set[int], beta: float = 2.0) -> float:
+    """
+    F-beta for two sets of internal doc_ids.
+    """
     if not y_true and not y_pred:
         return 0.0
 
@@ -210,8 +293,15 @@ def f_beta_for_sets(y_true: Set[int], y_pred: Set[int], beta: float = 2.0) -> fl
     return (1 + beta2) * precision * recall / (beta2 * precision + recall)
 
 
-# ---------- Macro-F2 metrics ----------
-def macro_f2_bm25_topk(k: int = 5, beta: float = 2.0, verbose: bool = False) -> float:
+# ============================================================
+# 8. Macro-F2 metrics for BM25 baseline
+# ============================================================
+
+def macro_f2_bm25_topk(
+    k: int = 5,
+    beta: float = 2.0,
+    verbose: bool = False,
+) -> float:
     """
     Baseline: use top-k BM25 candidates as prediction for each train question.
     """
@@ -232,7 +322,10 @@ def macro_f2_bm25_topk(k: int = 5, beta: float = 2.0, verbose: bool = False) -> 
     return macro_f2
 
 
-# ---------- Logistic regression reranker ----------
+# ============================================================
+# 9. Logistic regression reranker
+# ============================================================
+
 def build_logreg_model(
     top_k_lexical: int = 200,
 ) -> LogisticRegression:
@@ -277,11 +370,17 @@ def _rerank_scores(
     alpha: float,
     logreg_model: LogisticRegression | None = None,
 ) -> np.ndarray:
+    """
+    Combine BM25 + cosine similarity either by:
+      - simple weighted sum (if logreg_model is None), or
+      - logistic regression probability (if logreg_model is provided).
+    """
     if logreg_model is None:
         # Simple weighted sum, after normalizing cosine to [0,1]
         cos_norm = (cos_sim + 1.0) / 2.0
         return alpha * bm25_norm + (1.0 - alpha) * cos_norm
 
+    # Use logistic regression probabilities as combined score
     X = np.stack([bm25_norm, cos_sim], axis=1)
     probs = logreg_model.predict_proba(X)[:, 1]
     return probs.astype("float32")
@@ -295,6 +394,9 @@ def macro_f2_rerank(
     logreg_model: LogisticRegression | None = None,
     verbose: bool = False,
 ) -> float:
+    """
+    Evaluate the reranking approach (BM25 + embeddings [+ optional LogReg]).
+    """
     scores: List[float] = []
 
     for i, q in enumerate(tqdm(train_data, desc="Rerank eval")):
@@ -325,7 +427,10 @@ def macro_f2_rerank(
     return macro_f2
 
 
-# ---------- Predictions for test set ----------
+# ============================================================
+# 10. Predictions for test set (Task 1 output)
+# ============================================================
+
 def build_predictions_for_questions_with_scores(
     questions: List[Dict[str, Any]],
     question_embeddings: np.ndarray,
@@ -334,6 +439,9 @@ def build_predictions_for_questions_with_scores(
     alpha: float = 0.6,
     logreg_model: LogisticRegression | None = None,
 ) -> List[Dict[str, Any]]:
+    """
+    Build predictions for a list of questions, including BM25, embedding, and combined scores.
+    """
     predictions: List[Dict[str, Any]] = []
 
     for i, q in enumerate(tqdm(questions, desc="Predicting for questions")):
@@ -373,7 +481,10 @@ def build_predictions_for_questions_with_scores(
     return predictions
 
 
-# ---------- Runtime helpers for QA (Task 2) ----------
+# ============================================================
+# 11. Runtime helpers for QA (Task 2)
+# ============================================================
+
 def retrieve_and_rerank(
     question_text: str,
     top_k_lexical: int = 200,
@@ -400,6 +511,10 @@ def retrieve_and_rerank_with_qemb(
     alpha: float = 0.6,
     logreg_model: LogisticRegression | None = None,
 ) -> List[Dict[str, Any]]:
+    """
+    Runtime helper used by Task 2: given a raw question and its embedding,
+    return top_k_final articles with full scores.
+    """
     lexical_candidates, bm25_norm, cos_sim = compute_candidate_features(
         question_text, question_embedding, top_k_lexical=top_k_lexical
     )
