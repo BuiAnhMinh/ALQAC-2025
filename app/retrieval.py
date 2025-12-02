@@ -1,4 +1,3 @@
-# retrieval.py
 import json
 from pathlib import Path
 from typing import List, Set, Tuple, Dict, Any
@@ -6,15 +5,12 @@ from typing import List, Set, Tuple, Dict, Any
 import numpy as np
 from tqdm import tqdm
 from underthesea import word_tokenize
-from rank_bm25 import BM25Okapi
 from sklearn.linear_model import LogisticRegression
 
 from app.config import (
     STOPWORDS_PATH,
-    ARTICLE_EMB_PATH,
     TRAIN_Q_EMB_PATH,
     TEST_Q_EMB_PATH,
-    ARTICLE_TOKENS_PATH,
     get_connection,
 )
 from app.data_loader import load_law_documents, load_train_data, load_test_data
@@ -25,7 +21,7 @@ law_documents = load_law_documents()
 train_data = load_train_data()
 test_data = load_test_data()
 
-# Build mapping doc_id -> metadata
+# Build mapping doc_id -> metadata (from JSON)
 DOCID_TO_META: Dict[int, Dict[str, Any]] = {d["doc_id"]: d for d in law_documents}
 
 # Reverse mapping (law_id, article_id) -> doc_id for DB results
@@ -49,7 +45,7 @@ LEGAL_WHITELIST = {"phải", "không", "được", "cấm", "trừ", "khi", "n�
 STOPWORDS = STOPWORDS - LEGAL_WHITELIST
 
 
-def underthesea_tokenizer(text: str):
+def underthesea_tokenizer(text: str) -> List[str]:
     if not isinstance(text, str):
         text = str(text)
     tokenized = word_tokenize(text, format="text")
@@ -58,36 +54,7 @@ def underthesea_tokenizer(text: str):
     return tokens
 
 
-def load_or_build_article_tokens(
-    docs: List[Dict[str, Any]],
-    cache_path: Path = ARTICLE_TOKENS_PATH,
-) -> List[List[str]]:
-    """
-    Either load pre-tokenized corpus from JSON cache,
-    or build it using underthesea_tokenizer and save.
-    """
-    if cache_path.exists():
-        print(f"Loading cached tokens from {cache_path}")
-        with cache_path.open("r", encoding="utf-8") as f:
-            tokens = json.load(f)
-        return tokens
-
-    print("Tokenizing articles...")
-    tokens = [underthesea_tokenizer(doc["text"]) for doc in docs]
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with cache_path.open("w", encoding="utf-8") as f:
-        json.dump(tokens, f, ensure_ascii=False)
-    print(f"Saved tokenized articles to {cache_path}")
-    return tokens
-
-
-corpus_tokens = load_or_build_article_tokens(law_documents)
-bm25 = BM25Okapi(corpus_tokens)
-
-# ---------- Load embeddings ----------
-article_embedding = np.load(ARTICLE_EMB_PATH)
-print("Article embeddings shape:", article_embedding.shape)
-
+# ---------- Load question embeddings (still from .npy is fine) ----------
 train_question_embeddings = np.load(TRAIN_Q_EMB_PATH)
 print("Train question embeddings shape:", train_question_embeddings.shape)
 
@@ -95,19 +62,21 @@ test_question_embeddings = np.load(TEST_Q_EMB_PATH)
 print("Test question embeddings shape:", test_question_embeddings.shape)
 
 
-# ---------- BM25 retrieval via Postgres ----------
-def bm25_lexical_retrieve(question_text: str, top_k: int = 50):
+# ---------- Lexical + embedding retrieval via Postgres ----------
+def bm25_lexical_retrieve(question_text: str, top_k: int = 50) -> List[Dict[str, Any]]:
     """
-    Lexical retrieval handled by Postgres using the `tokens` column.
+    Lexical retrieval handled by Postgres using the `tokens` (text[]) column
+    and retrieves the article `embedding` from the DB as well.
 
-    Returns the same structure as the original in-memory BM25 version:
+    Returns:
     [
         {
-            "doc_id": int,
-            "bm25_score": float,
+            "doc_id": int,          # from JSON mapping
+            "bm25_score": float,    # ts_rank_cd score (higher = better)
             "law_id": str,
             "article_id": str,
             "text": str,
+            "embedding": List[float] or np.ndarray,
         },
         ...
     ]
@@ -127,32 +96,35 @@ def bm25_lexical_retrieve(question_text: str, top_k: int = 50):
     conn = get_connection()
     cur = conn.cursor()
     try:
-        # Using on-the-fly to_tsvector over the `tokens` column
+        # tokens is a text[] column, so convert to space-separated string
+        # embedding is a vector column (pgvector)
         cur.execute(
             """
             SELECT law_id,
                    article_id,
                    text,
+                   embedding,
                    ts_rank_cd(
-                       to_tsvector('simple', tokens),
+                       to_tsvector('simple', array_to_string(tokens, ' ')),
                        to_tsquery('simple', %s)
                    ) AS rank
             FROM articles
-            WHERE to_tsvector('simple', tokens) @@ to_tsquery('simple', %s)
+            WHERE embedding IS NOT NULL
+              AND to_tsvector('simple', array_to_string(tokens, ' '))
+                  @@ to_tsquery('simple', %s)
             ORDER BY rank DESC
             LIMIT %s;
             """,
             (ts_query, ts_query, top_k),
         )
-
         rows = cur.fetchall()
     finally:
         cur.close()
         conn.close()
 
-    results = []
-    for law_id, article_id, text, rank in rows:
-        # Map back to doc_id used by article_embeddings.npy
+    results: List[Dict[str, Any]] = []
+    for law_id, article_id, text, emb, rank in rows:
+        # Map back to doc_id used in law_documents (for consistency with rest of code)
         key = (law_id, article_id)
         doc_id = LAW_ART_TO_DOCID.get(key)
         if doc_id is None:
@@ -166,6 +138,7 @@ def bm25_lexical_retrieve(question_text: str, top_k: int = 50):
                 "law_id": law_id,
                 "article_id": article_id,
                 "text": text,
+                "embedding": emb,  # pgvector -> list-like; we convert later
             }
         )
 
@@ -178,34 +151,61 @@ def compute_candidate_features(
     question_embedding: np.ndarray,
     top_k_lexical: int = 200,
 ):
+    """
+    For a given question (text + embedding), retrieve lexical candidates from DB,
+    then compute:
+      - bm25_norm: normalized lexical scores
+      - cos_sim: cosine similarity between DB embeddings and question embedding
+    """
     lexical_candidates = bm25_lexical_retrieve(
         question_text,
         top_k=top_k_lexical,
     )
-    cand_doc_ids = [c["doc_id"] for c in lexical_candidates]
+
+    if not lexical_candidates:
+        # Nothing retrieved
+        return [], np.array([], dtype="float32"), np.array([], dtype="float32")
+
+    # BM25 / ts_rank_cd scores
     bm25_scores = np.array(
-        [c["bm25_score"] for c in lexical_candidates], dtype="float32"
+        [c["bm25_score"] for c in lexical_candidates],
+        dtype="float32",
     )
 
     # Normalize BM25 scores to [0, 1]
-    if bm25_scores.size == 0:
-        bm25_norm = bm25_scores
+    max_score = bm25_scores.max()
+    if max_score > 0:
+        bm25_norm = bm25_scores / max_score
     else:
-        max_score = bm25_scores.max()
-        if max_score > 0:
-            bm25_norm = bm25_scores / max_score
-        else:
-            bm25_norm = bm25_scores
+        bm25_norm = bm25_scores
 
-    # Candidate embeddings
-    cand_embs = article_embedding[cand_doc_ids]  # shape (n_cand, d)
+    # Candidate embeddings from DB
+    # emb from psycopg2/pgvector is list-like, convert to float32 array
+    cand_embs_list = []
+    for c in lexical_candidates:
+        emb_raw = c["embedding"]
+
+        # If it's a string like "[-0.01,0.02,...]", parse it as JSON
+        if isinstance(emb_raw, str):
+            # Remove whitespace just in case and parse
+            emb_list = json.loads(emb_raw)
+        # If it's already a list/tuple/ndarray, use it directly
+        elif isinstance(emb_raw, (list, tuple, np.ndarray)):
+            emb_list = emb_raw
+        else:
+            # Fallback: try to cast to list
+            emb_list = list(emb_raw)
+
+        emb_arr = np.array(emb_list, dtype="float32")
+        cand_embs_list.append(emb_arr)
+
+    cand_embs = np.stack(cand_embs_list, axis=0)
 
     # Cosine similarity
-    q_emb = question_embedding  # shape (d,)
+    q_emb = question_embedding.astype("float32")  # shape (d,)
     dot = cand_embs @ q_emb
     norms = np.linalg.norm(cand_embs, axis=1) * np.linalg.norm(q_emb)
-    # Avoid division by zero
-    norms = np.where(norms == 0, 1e-8, norms)
+    norms = np.where(norms == 0, 1e-8, norms)  # avoid division by zero
     cos_sim = dot / norms  # shape (n_cand,)
 
     return lexical_candidates, bm25_norm, cos_sim
@@ -285,13 +285,12 @@ def retrieve_and_rerank(
       - then calls retrieve_and_rerank_with_qemb.
     """
 
+    if question_index is None:
+        raise ValueError("question_index must be provided")
+
     if use_train_embedding:
-        if question_index is None:
-            raise ValueError("question_index must be provided when use_train_embedding=True")
         q_emb = train_question_embeddings[question_index]
     else:
-        if question_index is None:
-            raise ValueError("question_index must be provided when use_train_embedding=False")
         q_emb = test_question_embeddings[question_index]
 
     return retrieve_and_rerank_with_qemb(
@@ -345,7 +344,7 @@ def macro_fbeta_bm25_topk(
     verbose: bool = True,
 ) -> float:
     """
-    Evaluate plain BM25 retrieval using Macro-Fbeta over all questions in data.
+    Evaluate plain BM25 (ts_rank_cd) retrieval using Macro-Fbeta over all questions in data.
     """
     f_scores = []
 
