@@ -6,6 +6,7 @@ Run (inside Docker app container):
 """
 
 import numpy as np
+import time
 
 from app import retrieval
 from app.data_loader import load_train_data
@@ -50,7 +51,8 @@ def test_single_question(
     # 3) Use the precomputed embedding for this training question
     q_emb = retrieval.train_question_embeddings[q_index]
 
-    # 4) Run BM25 + cosine (+ optional LogReg) pipeline
+    # 4) Run BM25 + cosine (+ optional LogReg) pipeline WITH TIMER
+    t0 = time.time()
     results = retrieval.retrieve_and_rerank_with_qemb(
         qtext,
         q_emb,
@@ -59,6 +61,8 @@ def test_single_question(
         alpha=alpha,
         logreg_model=logreg_model,
     )
+    elapsed = time.time() - t0
+    print(f"Retrieval done in {elapsed:.3f} seconds.\n")
 
     # 5) Print top-k with HIT/MISS vs GOLD
     print(f"Top {top_k_final} retrieved articles (BM25 + cosine):")
@@ -78,7 +82,7 @@ def test_single_question(
 if __name__ == "__main__":
     # you can change q_index to inspect different training questions
     test_single_question(
-        q_index= 10,
+        q_index=10,
         top_k_lexical=200,
         top_k_final=10,
         alpha=0.6,
