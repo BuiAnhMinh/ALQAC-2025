@@ -20,7 +20,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 # Law corpora (adjust these in .env to match your real files)
 LAW_PATH = Path(os.getenv("LAW_PATH", DATA_DIR / "alqac25_law.json"))
 ZALO_LAW_PATH = Path(os.getenv("ZALO_LAW_PATH", DATA_DIR / "zalo_corpus.json"))
-
+ZALO_QUESTION_PATH = Path(os.getenv("ZALO_QUESTION_PATH", DATA_DIR / "zalo_question.json"))
 TRAIN_PATH = Path(os.getenv("TRAIN_PATH", DATA_DIR / "alqac25_train.json"))
 TEST_PATH = Path(os.getenv("TEST_PATH", DATA_DIR / "alqac25_private_test_Task_1.json"))
 

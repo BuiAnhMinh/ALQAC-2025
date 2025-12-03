@@ -3,7 +3,7 @@ import json
 from typing import List, Dict, Any
 from pathlib import Path
 
-from app.config import LAW_PATH, ZALO_LAW_PATH, TRAIN_PATH, TEST_PATH
+from app.config import LAW_PATH, ZALO_LAW_PATH, TRAIN_PATH, TEST_PATH, ZALO_QUESTION_PATH
 
 ALQAC_SOURCE = "alqac"
 ZALO_SOURCE = "zalo"
@@ -13,7 +13,14 @@ def load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
-
+def load_zalo_questions() -> list[dict]:
+    """
+    Load Zalo training questions from zalo_question.json.
+    Expected format: list of dicts with keys: question_id, text, relevant_articles, ...
+    """
+    with open(ZALO_QUESTION_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+    
 def load_law_documents() -> List[Dict[str, Any]]:
     """
     Build a flat list of law+article docs from ALQAC + Zalo JSON.
