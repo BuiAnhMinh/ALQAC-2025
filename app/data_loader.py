@@ -5,6 +5,9 @@ from pathlib import Path
 
 from app.config import LAW_PATH, ZALO_LAW_PATH, TRAIN_PATH, TEST_PATH
 
+ALQAC_SOURCE = "alqac"
+ZALO_SOURCE = "zalo"
+
 
 def load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
@@ -41,6 +44,7 @@ def load_law_documents() -> List[Dict[str, Any]]:
                     "law_id": law_id,
                     "article_id": artc["id"],
                     "text": text,
+                    "source": ALQAC_SOURCE,
                 }
             )
 
@@ -61,6 +65,7 @@ def load_law_documents() -> List[Dict[str, Any]]:
                     "law_id": law_id,
                     "article_id": artc["id"],
                     "text": text,
+                    "source": ZALO_SOURCE,
                 }
             )
 

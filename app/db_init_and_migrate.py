@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS laws (
     id          SERIAL PRIMARY KEY,
     law_id      TEXT NOT NULL UNIQUE,
     title       TEXT,
+    source      TEXT NOT NULL DEFAULT 'unknown',
     created_at  TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
@@ -23,7 +24,9 @@ CREATE TABLE IF NOT EXISTS articles (
     text        TEXT NOT NULL,
     embedding   vector(1536),
     tokens      TEXT[],
+    source      TEXT NOT NULL DEFAULT 'unknown', 
     created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    is_amending_article BOOLEAN NOT NULL DEFAULT FALSE,
     CONSTRAINT uq_law_article UNIQUE (law_id, article_id)
 );
 
@@ -78,13 +81,17 @@ def main():
             if law_id in seen:
                 continue
             seen.add(law_id)
+            
+            source = d.get("source", "unknown")
+            
             cur.execute(
                 """
-                INSERT INTO laws (law_id)
-                VALUES (%s)
-                ON CONFLICT (law_id) DO NOTHING;
+                INSERT INTO laws (law_id, source)
+                VALUES (%s, %s)
+                ON CONFLICT (law_id) DO UPDATE
+                SET source = EXCLUDED.source;
                 """,
-                (law_id,),
+                (law_id, source),
             )
         conn.commit()
         print(f"Inserted/ensured {len(seen)} laws.")
@@ -112,15 +119,19 @@ def main():
             text = d["text"] or ""
             tokens = _tokenize_text(text)
 
+            source = d.get("source", "unknown")
+            
             cur.execute(
                 """
-                INSERT INTO articles (law_fk, law_id, article_id, text, tokens)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO articles (law_fk, law_id, article_id, text, tokens, source)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (law_id, article_id) DO UPDATE
-                SET text = EXCLUDED.text,
-                    tokens = EXCLUDED.tokens;
+                SET law_fk = EXCLUDED.law_fk,
+                    text = EXCLUDED.text,
+                    tokens = EXCLUDED.tokens,
+                    source = EXCLUDED.source;
                 """,
-                (law_pk, law_id, d["article_id"], text, tokens),
+                (law_pk, law_id, d["article_id"], text, tokens, source),
             )
             inserted_articles += 1
 
