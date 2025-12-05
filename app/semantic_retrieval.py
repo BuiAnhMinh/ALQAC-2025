@@ -27,10 +27,13 @@ def semantic_retrieve(
     model_key: str = DEFAULT_MODEL_KEY,
 ) -> List[Dict[str, Any]]:
     """
-    Embedding-only retrieval on Zalo articles:
+    Embedding-only retrieval on Zalo articles using the `articles.embedding` column.
+
       - embed question using the given model_key
-      - pgvector search on article_embeddings.embedding
+      - pgvector search on articles.embedding
       - restrict to laws.source = 'zalo'
+      - skip amending articles
+
     Returns list of dicts:
       {id, law_id, article_id, doc_id, text, tokens, semantic_distance}
     """
@@ -42,7 +45,7 @@ def semantic_retrieve(
     cur = conn.cursor()
 
     try:
-        # 2) Vector search
+        # 2) Vector search directly on articles.embedding
         cur.execute(
             """
             SELECT
@@ -51,19 +54,17 @@ def semantic_retrieve(
                 a.article_id,
                 a.text,
                 a.tokens,
-                (e.embedding <=> %s::vector) AS distance
-            FROM article_embeddings e
-            JOIN articles a
-                ON a.id = e.article_id
+                (a.embedding <=> %s::vector) AS distance
+            FROM articles a
             JOIN laws l
                 ON l.law_id = a.law_id
-            WHERE e.model_key = %s
-                AND l.source = 'zalo'
-                AND COALESCE(a.is_amending_article, FALSE) = FALSE
-            ORDER BY e.embedding <=> %s::vector
+            WHERE l.source = 'zalo'
+              AND COALESCE(a.is_amending_article, FALSE) = FALSE
+              AND a.embedding IS NOT NULL
+            ORDER BY a.embedding <=> %s::vector
             LIMIT %s;
             """,
-            (q_literal, model_key, q_literal, top_k),
+            (q_literal, q_literal, top_k),
         )
         rows = cur.fetchall()
     finally:

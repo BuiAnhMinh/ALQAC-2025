@@ -20,6 +20,7 @@ from app.embedding import DEFAULT_MODEL_KEY
 # Limit number of questions evaluated (set to None or a large number for all).
 MAX_QUESTIONS: int = 50
 
+
 def fbeta_for_sets(
     gold: Set[Tuple[str, str]],
     pred: Set[Tuple[str, str]],
@@ -31,25 +32,28 @@ def fbeta_for_sets(
     fp = len(pred - gold)
     fn = len(gold - pred)
 
+    # No gold, no pred -> define F as 0
     if tp == 0 and fp == 0 and fn == 0:
         return 0.0
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
 
-    if precision == 0 and recall == 0:
+    if precision == 0.0 and recall == 0.0:
         return 0.0
 
     return (1 + beta2) * precision * recall / (beta2 * precision + recall)
 
 
-def debug_one_question():
+def debug_one_question() -> None:
+    """Quick sanity check on a single question and the embedding retriever."""
     questions = load_zalo_questions()
     q = questions[0]
 
     print("DEBUG QUESTION:")
-    print("id:", q.get("question_id"))
+    print("id:", q["id"])
     print("text:", q["text"])
+
     gold_articles = {(a["law_id"], a["article_id"]) for a in q["relevant_articles"]}
     print("GOLD:", gold_articles)
 
@@ -61,6 +65,7 @@ def debug_one_question():
     pred_articles = {(p["law_id"], p["article_id"]) for p in preds}
     print("EMBEDDING PRED:", pred_articles)
 
+
 def eval_retriever_on_zalo(
     method: str,
     model_key: str | None = None,
@@ -71,8 +76,10 @@ def eval_retriever_on_zalo(
     method: 'bm25' | 'embedding' | 'hybrid'
     model_key: required for embedding/hybrid, ignored for bm25
     """
-    questions = load_zalo_questions()  # adapt if needed
-    questions = questions[:MAX_QUESTIONS]
+    questions = load_zalo_questions()
+    if MAX_QUESTIONS is not None:
+        questions = questions[:MAX_QUESTIONS]
+
     scores: List[float] = []
 
     for q in questions:
@@ -83,16 +90,20 @@ def eval_retriever_on_zalo(
         }
 
         if method == "bm25":
-            preds = retrieval.retrieve_bm25(qtext, top_k=top_k)
+            # Use the BM25-only retriever we already debugged
+            preds = retrieval.retrieve_bm25(
+                question_text=qtext,
+                top_k=top_k,
+            )
         elif method == "embedding":
             preds = retrieval.retrieve_embedding_only(
-                qtext,
+                question_text=qtext,
                 top_k=top_k,
                 model_key=model_key or DEFAULT_MODEL_KEY,
             )
         elif method == "hybrid":
             preds = retrieval.retrieve_hybrid(
-                qtext,
+                question_text=qtext,
                 semantic_top_k=200,
                 lexical_top_k=top_k,
                 model_key=model_key or DEFAULT_MODEL_KEY,
@@ -100,10 +111,7 @@ def eval_retriever_on_zalo(
         else:
             raise ValueError(f"Unknown method: {method}")
 
-        pred_articles = {
-            (p["law_id"], p["article_id"])
-            for p in preds
-        }
+        pred_articles = {(p["law_id"], p["article_id"]) for p in preds}
 
         f = fbeta_for_sets(gold_articles, pred_articles, beta=beta)
         scores.append(f)
@@ -120,7 +128,8 @@ def main() -> None:
     methods = ["bm25", "embedding", "hybrid"]
     model_keys = [DEFAULT_MODEL_KEY]  # adapt to your registry
     top_k_values = [3, 5, 10]
-    
+
+    # Optional: quick one-question debug
     debug_one_question()
 
     for method in methods:
