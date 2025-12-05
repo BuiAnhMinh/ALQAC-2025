@@ -4,57 +4,66 @@ import numpy as np
 
 from app.config import get_connection
 from app.data_loader import load_law_documents
-from app.embedding import embed_text
+from app.embedding import embed_text, DEFAULT_MODEL_KEY
 
 # Map (law_id, article_id) -> doc_id for consistent IDs across JSON/DB
 LAW_ART_TO_DOCID: Dict[tuple[str, str], int] = {
     (d["law_id"], d["article_id"]): d["doc_id"] for d in load_law_documents()
 }
 
+
 def _emb_to_pgvector_literal(emb: np.ndarray | List[float]) -> str:
     """
     Convert a numpy array or list of floats into a pgvector literal: '[0.1,0.2,0.3]'.
     """
-    if isinstance(emb, np.ndarray):
-        emb = emb.tolist()
-    return "[" + ",".join(f"{float(x):.6f}" for x in emb) + "]"
+    if isinstance(emb, list):
+        emb = np.array(emb, dtype="float32")
+    return "[" + ",".join(f"{float(x):.6f}" for x in emb.tolist()) + "]"
 
 
 def semantic_retrieve(
     question_text: str,
     top_k: int = 200,
-    question_embedding: np.ndarray | None = None,
+    model_key: str = DEFAULT_MODEL_KEY,
 ) -> List[Dict[str, Any]]:
     """
-    Vector retrieval on articles that come from Zalo and are marked as amending.
-
-    Returns top_k candidates ordered by vector distance, each with DB id + metadata.
+    Embedding-only retrieval on Zalo articles:
+      - embed question using the given model_key
+      - pgvector search on article_embeddings.embedding
+      - restrict to laws.source = 'zalo'
+    Returns list of dicts:
+      {id, law_id, article_id, doc_id, text, tokens, semantic_distance}
     """
-    # 1) Get embedding for the question
-    q_emb = question_embedding if question_embedding is not None else embed_text(question_text)
-
-    # 2) Convert to pgvector literal string: "[0.123456,0.234567,...]"
-    q_emb_str = _emb_to_pgvector_literal(q_emb)
+    # 1) Embed the question
+    q_emb = embed_text(question_text, model_key=model_key)
+    q_literal = _emb_to_pgvector_literal(q_emb)
 
     conn = get_connection()
     cur = conn.cursor()
+
     try:
+        # 2) Vector search
         cur.execute(
             """
-            SELECT id,
-                   law_id,
-                   article_id,
-                   text,
-                   tokens,
-                   embedding <=> %s AS distance
-            FROM articles
-            WHERE embedding IS NOT NULL
-              AND source = 'zalo'
-              AND is_amending_article = FALSE
-            ORDER BY embedding <=> %s
+            SELECT
+                a.id AS article_db_id,
+                a.law_id,
+                a.article_id,
+                a.text,
+                a.tokens,
+                (e.embedding <=> %s::vector) AS distance
+            FROM article_embeddings e
+            JOIN articles a
+                ON a.id = e.article_id
+            JOIN laws l
+                ON l.law_id = a.law_id
+            WHERE e.model_key = %s
+                AND l.source = 'zalo'
+                AND COALESCE(a.is_amending_article, FALSE) = FALSE
+            ORDER BY e.embedding <=> %s::vector
             LIMIT %s;
             """,
-            (q_emb_str, q_emb_str, top_k),
+            (q_literal, model_key, q_literal, top_k),
         )
         rows = cur.fetchall()
     finally:
@@ -62,7 +71,8 @@ def semantic_retrieve(
         conn.close()
 
     results: List[Dict[str, Any]] = []
-    for art_db_id, law_id, article_id, text, tokens, distance in rows:
+    for row in rows:
+        art_db_id, law_id, article_id, text, tokens, distance = row
         doc_id = LAW_ART_TO_DOCID.get((law_id, article_id))
         results.append(
             {

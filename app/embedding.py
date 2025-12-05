@@ -15,6 +15,29 @@ from app.config import (
 )
 from app.data_loader import load_law_documents, load_train_data, load_test_data
 
+EMBEDDING_MODELS: Dict[str, Dict[str, Any]] = {
+    # Default OpenAI via OpenRouter (adapt to your actual setup)
+    "openai_small": {
+        "provider": "openai",
+        "model_name": EMB_MODEL or "openai/text-embedding-3-small",
+        "dim": 1536,
+    },
+    # Example: add more models later
+    # "other_model": {
+    #     "provider": "openai",
+    #     "model_name": "some/other-embedding-model",
+    #     "dim": 1024,
+    # },
+}
+
+DEFAULT_MODEL_KEY = "openai_small"
+
+def get_embedding_config(model_key: str) -> Dict[str, Any]:
+    try:
+        return EMBEDDING_MODELS[model_key]
+    except KeyError:
+        raise ValueError(f"Unknown embedding model_key: {model_key!r}")
+
 
 def _clean_text(text: str) -> str:
     if not isinstance(text, str):
@@ -111,15 +134,25 @@ def build_question_embeddings(
     print(f"Saved question embeddings to {cache_path}")
     return arr
 
+def embed_text(text: str, model_key: str = DEFAULT_MODEL_KEY) -> np.ndarray:
+    """
+    Embed a single text string using the configured embedding model.
+    Keeps your existing get_client() + OpenRouter/OpenAI setup.
+    """
+    cfg = get_embedding_config(model_key)
+    client = get_client()  # your existing function, usually bound to OpenRouter
+    model_name = cfg["model_name"]
 
-def embed_text(text: str) -> np.ndarray:
-    """
-    Embed a single text (used at runtime / Task 2).
-    """
-    client = get_client()
-    text = _clean_text(text)
-    resp = client.embeddings.create(model=EMB_MODEL, input=[text])
-    return np.array(resp.data[0].embedding, dtype="float32")
+    # Truncate for safety
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS]
+
+    resp = client.embeddings.create(
+        model=model_name,
+        input=text,
+    )
+    emb = np.array(resp.data[0].embedding, dtype="float32")
+    return emb
 
 
 def main():
