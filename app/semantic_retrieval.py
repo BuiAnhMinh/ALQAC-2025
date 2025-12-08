@@ -4,7 +4,7 @@ import numpy as np
 
 from app.config import get_connection
 from app.data_loader import load_law_documents
-from app.embedding import embed_text, DEFAULT_MODEL_KEY
+from app.embedding.embedding import embed_text, DEFAULT_MODEL_KEY
 
 # Map (law_id, article_id) -> doc_id for consistent IDs across JSON/DB
 LAW_ART_TO_DOCID: Dict[tuple[str, str], int] = {
@@ -46,6 +46,76 @@ def semantic_retrieve(
 
     try:
         # 2) Vector search directly on articles.embedding
+        cur.execute(
+            """
+            SELECT
+                a.id AS article_db_id,
+                a.law_id,
+                a.article_id,
+                a.text,
+                a.tokens,
+                (a.embedding <=> %s::vector) AS distance
+            FROM articles a
+            JOIN laws l
+                ON l.law_id = a.law_id
+            WHERE l.source = 'zalo'
+              AND COALESCE(a.is_amending_article, FALSE) = FALSE
+              AND a.embedding IS NOT NULL
+            ORDER BY a.embedding <=> %s::vector
+            LIMIT %s;
+            """,
+            (q_literal, q_literal, top_k),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        art_db_id, law_id, article_id, text, tokens, distance = row
+        doc_id = LAW_ART_TO_DOCID.get((law_id, article_id))
+        results.append(
+            {
+                "id": art_db_id,
+                "law_id": law_id,
+                "article_id": article_id,
+                "doc_id": doc_id,
+                "text": text,
+                "tokens": tokens,
+                "semantic_distance": float(distance),
+            }
+        )
+
+    return results
+
+
+def semantic_retrieve_from_embedding(
+    q_emb: np.ndarray | List[float],
+    top_k: int = 200,
+) -> List[Dict[str, Any]]:
+    """
+    Embedding-only retrieval using a *precomputed* question embedding.
+
+    This mirrors `semantic_retrieve`, but skips the `embed_text` API call and
+    instead takes an already-embedded question vector (same dimension as
+    `articles.embedding` in Postgres).
+    """
+    # Ensure numpy float32 1D
+    if isinstance(q_emb, list):
+        q_emb = np.array(q_emb, dtype="float32")
+    else:
+        q_emb = np.asarray(q_emb, dtype="float32")
+
+    if q_emb.ndim == 2:
+        q_emb = q_emb[0]
+
+    q_literal = _emb_to_pgvector_literal(q_emb)
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
         cur.execute(
             """
             SELECT

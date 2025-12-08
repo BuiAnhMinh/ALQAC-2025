@@ -12,13 +12,27 @@ Metrics:
 """
 
 from typing import Dict, Set, Tuple, List
+from pathlib import Path
+import json
+
+import numpy as np
 
 from app import retrieval
 from app.data_loader import load_zalo_questions
-from app.embedding import DEFAULT_MODEL_KEY
+from app.embedding.embedding import DEFAULT_MODEL_KEY
+from app.semantic_retrieval import semantic_retrieve_from_embedding
+from app.lexical_retrieval import bm25_lexical_rerank
 
 # Limit number of questions evaluated (set to None or a large number for all).
-MAX_QUESTIONS: int = 50
+MAX_QUESTIONS: int = 10
+
+# Precomputed Zalo question embeddings (built by zalo_embed_question.py)
+DATA_DIR = Path("data")
+ZALO_Q_EMB = np.load(DATA_DIR / "zalo_question_embeddings.npy")
+with (DATA_DIR / "zalo_question_ids.json").open("r", encoding="utf-8") as f:
+    ZALO_Q_IDS: List[str] = json.load(f)
+
+QID2IDX: Dict[str, int] = {qid: i for i, qid in enumerate(ZALO_Q_IDS)}
 
 
 def fbeta_for_sets(
@@ -57,11 +71,11 @@ def debug_one_question() -> None:
     gold_articles = {(a["law_id"], a["article_id"]) for a in q["relevant_articles"]}
     print("GOLD:", gold_articles)
 
-    preds = retrieval.retrieve_embedding_only(
-        q["text"],
-        top_k=5,
-        model_key=DEFAULT_MODEL_KEY,
-    )
+    qid = q["id"]
+    q_idx = QID2IDX[qid]
+    q_emb = ZALO_Q_EMB[q_idx]
+
+    preds = semantic_retrieve_from_embedding(q_emb, top_k=5)
     pred_articles = {(p["law_id"], p["article_id"]) for p in preds}
     print("EMBEDDING PRED:", pred_articles)
 
@@ -73,8 +87,10 @@ def eval_retriever_on_zalo(
     beta: float = 2.0,
 ) -> None:
     """
+    Evaluate one retrieval method on a subset of Zalo questions.
+
     method: 'bm25' | 'embedding' | 'hybrid'
-    model_key: required for embedding/hybrid, ignored for bm25
+    model_key: kept for API compatibility, ignored in offline embedding mode.
     """
     questions = load_zalo_questions()
     if MAX_QUESTIONS is not None:
@@ -84,6 +100,7 @@ def eval_retriever_on_zalo(
 
     for q in questions:
         qtext = q["text"]
+        qid = q["id"]
         gold_articles = {
             (a["law_id"], a["article_id"])
             for a in q["relevant_articles"]
@@ -95,19 +112,29 @@ def eval_retriever_on_zalo(
                 question_text=qtext,
                 top_k=top_k,
             )
+
         elif method == "embedding":
-            preds = retrieval.retrieve_embedding_only(
-                question_text=qtext,
-                top_k=top_k,
-                model_key=model_key or DEFAULT_MODEL_KEY,
-            )
+            # Use precomputed question embedding + pgvector
+            q_idx = QID2IDX[qid]
+            q_emb = ZALO_Q_EMB[q_idx]
+            preds = semantic_retrieve_from_embedding(q_emb, top_k=top_k)
+
         elif method == "hybrid":
-            preds = retrieval.retrieve_hybrid(
-                question_text=qtext,
-                semantic_top_k=200,
-                lexical_top_k=top_k,
-                model_key=model_key or DEFAULT_MODEL_KEY,
+            # Hybrid (semantic then lexical) using precomputed question embeddings.
+            # 1) Semantic candidates from pgvector
+            q_idx = QID2IDX[qid]
+            q_emb = ZALO_Q_EMB[q_idx]
+            semantic_candidates = semantic_retrieve_from_embedding(
+                q_emb,
+                top_k=200,
             )
+            # 2) BM25 rerank within these candidates
+            preds = bm25_lexical_rerank(
+                question_text=qtext,
+                candidates=semantic_candidates,
+                top_k=top_k,
+            )
+
         else:
             raise ValueError(f"Unknown method: {method}")
 
@@ -126,7 +153,7 @@ def eval_retriever_on_zalo(
 def main() -> None:
     # Simple default grid of experiments
     methods = ["bm25", "embedding", "hybrid"]
-    model_keys = [DEFAULT_MODEL_KEY]  # adapt to your registry
+    model_keys = [DEFAULT_MODEL_KEY]  # kept for compatibility, unused offline
     top_k_values = [3, 5, 10]
 
     # Optional: quick one-question debug

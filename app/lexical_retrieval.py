@@ -6,7 +6,7 @@ from underthesea import word_tokenize
 from app.config import STOPWORDS_PATH
 from app.data_loader import load_law_documents
 from app.semantic_retrieval import semantic_retrieve
-from app.embedding import DEFAULT_MODEL_KEY
+from app.embedding.embedding import DEFAULT_MODEL_KEY
 
 # ---------- Stopwords & tokenizer ----------
 def _load_stopwords(path: str) -> set[str]:
@@ -19,85 +19,57 @@ def _load_stopwords(path: str) -> set[str]:
     return stopwords
 
 
-STOPWORDS: set[str] = _load_stopwords(STOPWORDS_PATH)
-LEGAL_WHITELIST: set[str] = {"văn_bản", "pháp_luật", "nghị_định", "thông_tư"}
+STOPWORDS = _load_stopwords(STOPWORDS_PATH)
 
 
 def underthesea_tokenizer(text: str) -> List[str]:
+    """
+    Tokenize Vietnamese text using underthesea and drop stopwords.
+    """
     tokens = word_tokenize(text, format="text").split()
-    cleaned = []
-    for t in tokens:
-        if t in LEGAL_WHITELIST:
-            cleaned.append(t)
-        elif t not in STOPWORDS:
-            cleaned.append(t)
-    return cleaned
+    return [t for t in tokens if t not in STOPWORDS]
 
 
-# ---------- Build BM25 index over Zalo articles ----------
-_DOCS: List[Dict[str, Any]] = []
-_CORPUS_TOKENS: List[List[str]] = []
-_BM25: BM25Okapi | None = None
+# ---------- Load all docs & pre-tokenize ----------
+_ALL_DOCS = load_law_documents()
 
+# Filter to Zalo + non-amending for BM25 (same as semantic side)
+_ZALO_DOCS = [
+    d for d in _ALL_DOCS
+    if d.get("source") == "zalo" and not d.get("is_amending_article", False)
+]
 
-def _build_bm25_index() -> None:
-    """
-    Build BM25Okapi index for ALL Zalo articles (not just amending ones).
-    Uses load_law_documents() for tokens/text.
-    """
-    global _DOCS, _CORPUS_TOKENS, _BM25
+ZALO_TEXTS: List[str] = [d["text"] for d in _ZALO_DOCS]
+ZALO_TOKENS: List[List[str]] = [underthesea_tokenizer(t) for t in ZALO_TEXTS]
 
-    if _BM25 is not None:
-        return
-
-    all_docs = load_law_documents()
-    docs_zalo = [d for d in all_docs if d.get("source") == "zalo" and not d.get("is_amending_article", False)]
-
-    _DOCS = docs_zalo
-    _CORPUS_TOKENS = []
-    for d in docs_zalo:
-        # if you already have tokens in d["tokens"], you can reuse them
-        if "tokens" in d and isinstance(d["tokens"], list):
-            tokens = d["tokens"]
-        else:
-            tokens = underthesea_tokenizer(d["text"])
-        _CORPUS_TOKENS.append(tokens)
-
-    _BM25 = BM25Okapi(_CORPUS_TOKENS)
-    print(f"BM25 index built for {len(_DOCS)} Zalo articles.")
+# Build a global BM25 model once at import time
+BM25_MODEL = BM25Okapi(ZALO_TOKENS)
 
 
 # ---------- BM25-only retrieval ----------
-def bm25_pure(
-    question_text: str,
-    top_k: int = 10,
-) -> List[Dict[str, Any]]:
+def bm25_pure(question_text: str, top_k: int = 10) -> List[Dict[str, Any]]:
     """
-    Pure BM25 retrieval on Zalo articles.
-    Returns top_k docs with bm25_score.
+    Pure BM25 over Zalo non-amending articles.
     """
-    _build_bm25_index()
-    assert _BM25 is not None
-
     q_tokens = underthesea_tokenizer(question_text)
-    scores = _BM25.get_scores(q_tokens)
+    scores = BM25_MODEL.get_scores(q_tokens)
 
-    # Get indices of top_k scores
     idx_scores = list(enumerate(scores))
     idx_scores.sort(key=lambda x: x[1], reverse=True)
     top_idx_scores = idx_scores[:top_k]
 
     results: List[Dict[str, Any]] = []
-    for idx, score in top_idx_scores:
-        d = _DOCS[idx]
+    for rank, (idx, score) in enumerate(top_idx_scores, start=1):
+        d = _ZALO_DOCS[idx]
         results.append(
             {
+                "rank": rank,
+                "bm25_score": float(score),
                 "doc_id": d["doc_id"],
                 "law_id": d["law_id"],
                 "article_id": d["article_id"],
                 "text": d["text"],
-                "tokens": d.get("tokens"),
-                "bm25_score": float(score),
+                "tokens": ZALO_TOKENS[idx],
             }
         )
 
@@ -134,7 +106,7 @@ def bm25_lexical_rerank(
     results: List[Dict[str, Any]] = []
     for idx, score in top_idx_scores:
         c = candidates[idx].copy()
-        c["bm25_score"] = float(score)
+        c["bm25_local_score"] = float(score)
         results.append(c)
 
     return results
@@ -165,7 +137,7 @@ def semantic_then_lexical(
     }
 
 
-def bm25_hybrid_retrieve(
+def semantic_then_lexical_top_k(
     question_text: str,
     top_k: int = 10,
     semantic_top_k: int = 200,
@@ -173,6 +145,27 @@ def bm25_hybrid_retrieve(
 ) -> List[Dict[str, Any]]:
     """
     Backward-compatible helper: semantic top semantic_top_k -> BM25 top_k.
+    """
+    combined = semantic_then_lexical(
+        question_text=question_text,
+        semantic_top_k=semantic_top_k,
+        lexical_top_k=top_k,
+        model_key=model_key,
+    )
+    return combined["lexical_results"]
+
+def bm25_hybrid_retrieve(
+    question_text: str,
+    top_k: int = 10,
+    semantic_top_k: int = 200,
+    model_key: str = DEFAULT_MODEL_KEY,
+) -> List[Dict[str, Any]]:
+    """
+    Backward-compatible wrapper expected by app.retrieval.
+
+    It runs:
+      1) semantic retrieval (top semantic_top_k)
+      2) BM25 rerank within those candidates to get top_k
     """
     combined = semantic_then_lexical(
         question_text=question_text,

@@ -47,7 +47,7 @@ def main(model_key: str = DEFAULT_MODEL_KEY) -> None:
     texts: list[str] = []
 
     for q in questions:
-        qid = q.get("question_id")
+        qid = q.get("id")
         text = q.get("text", "")
 
         if not isinstance(text, str):

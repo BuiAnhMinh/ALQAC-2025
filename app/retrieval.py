@@ -16,7 +16,7 @@ from app.lexical_retrieval import (
     semantic_then_lexical,
     bm25_hybrid_retrieve,
 )
-from app.embedding import DEFAULT_MODEL_KEY
+from app.embedding.embedding import DEFAULT_MODEL_KEY
 
 
 # ---------- Public methods ----------
