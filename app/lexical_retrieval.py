@@ -111,6 +111,36 @@ def bm25_lexical_rerank(
 
     return results
 
+def bm25_db_retrieve(question_text: str, top_k: int = 200, source: str = "zalo"):
+    sql = """
+    SELECT
+      a.id AS doc_id,
+      a.law_id,
+      a.article_id,
+      lexical_text <@> to_bm25query(%(q)s, 'articles_content_idx') AS bm25_score
+    FROM articles a
+    JOIN laws l ON l.law_id = a.law_id
+    WHERE l.source = %(source)s
+      AND COALESCE(a.is_amending_article, FALSE) = FALSE
+      AND lexical_text IS NOT NULL
+    ORDER BY bm25_score
+    LIMIT %(k)s;
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(sql, {"q": question_text, "source": source, "k": top_k})
+        rows = cur.fetchall()
+
+    results = [
+        {
+            "doc_id": row[0],
+            "law_id": row[1],
+            "article_id": row[2],
+            "bm25_score": float(row[3]),
+        }
+        for row in rows
+    ]
+    return results
 
 def semantic_then_lexical(
     question_text: str,
